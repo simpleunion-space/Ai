@@ -1,0 +1,14 @@
+---
+# accounts_list: список системных учётных записей, которые роль должна
+# создать/подтвердить на хосте. Реальные значения задаются в локальном
+# inventories/<name>/inventory.yaml - здесь только форма записи.
+#
+# - name: setup
+#   uid: 9999
+#   gid: 9999
+#   shell: /bin/bash
+#   sudo: none | group | passwordless
+#   ssh_authorized_keys: []
+#   password_lock: false
+#   password_plaintext: <локальный plaintext-пароль; задаётся только при необходимости>
+accounts_list: []

@@ -1,0 +1,76 @@
+---
+- name: Ensure primary groups exist
+  ansible.builtin.group:
+    name: "{{ item.name }}"
+    gid: "{{ item.gid }}"
+    state: present
+  loop: "{{ accounts_list }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Ensure user accounts exist
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    uid: "{{ item.uid }}"
+    group: "{{ item.name }}"
+    shell: "{{ item.shell }}"
+    password_lock: "{{ item.password_lock | default(false) }}"
+    create_home: true
+    state: present
+  loop: "{{ accounts_list }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Set passwords for configured accounts
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    password: >-
+      {{ item.password_plaintext | password_hash(
+        'sha512',
+        ((inventory_hostname ~ ':' ~ item.name) | hash('sha256')) | truncate(16, true, '')
+      ) }}
+    password_lock: false
+    update_password: always
+  loop: "{{ accounts_list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.password_plaintext is defined
+  no_log: true
+
+# Plain sudo-group membership - relies on the distro's own /etc/sudoers
+# "%sudo ALL=(ALL:ALL) ALL" line, so the account's own login password is
+# what sudo prompts for. No dedicated sudoers.d file for this case.
+- name: Add sudo-group accounts to the sudo group
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    groups: sudo
+    append: true
+  loop: "{{ accounts_list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.sudo | default('none') == 'group'
+
+- name: Grant passwordless sudo to designated accounts
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ item.name }}"
+    content: "{{ item.name }} ALL=(ALL) NOPASSWD:ALL\n"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"
+  loop: "{{ accounts_list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.sudo | default('none') == 'passwordless'
+
+# exclusive: false - only ever adds the listed keys, never removes a key
+# that was added to the account outside this playbook.
+- name: Deploy authorized SSH keys
+  ansible.posix.authorized_key:
+    user: "{{ item.0.name }}"
+    key: "{{ item.1 }}"
+    exclusive: false
+    state: present
+  loop: "{{ accounts_list | subelements('ssh_authorized_keys', skip_missing=True) }}"
+  loop_control:
+    label: "{{ item.0.name }}"

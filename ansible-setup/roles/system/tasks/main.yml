@@ -1,0 +1,5 @@
+---
+- name: Set system hostname
+  ansible.builtin.hostname:
+    name: "{{ target_hostname }}"
+  when: target_hostname | default('') | trim | length > 0
