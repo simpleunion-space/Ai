@@ -1,0 +1,114 @@
+# yaml-language-server: $schema=https://agentgateway.dev/schema/config
+#
+# Static, installation-agnostic template - installed verbatim (no host-side
+# rendering) by install_agentgateway_config() in apply.sh (see that
+# function for the exact host path this lands at). Every dollar-prefixed
+# name below (e.g. AGENTGATEWAY_OPENWEBUI_TOKEN) is expanded by agentgateway
+# itself from its OWN container environment at config-load time (confirmed:
+# substitution runs over the whole file, before YAML parsing - an unset
+# referenced var, even one written in a comment, crashes startup - this
+# comment block deliberately never spells those names with their leading
+# "$" for exactly that reason). compose.yaml defines syntactically-valid,
+# NON-empty placeholders for all seven (an empty string parses as YAML null
+# for a required String field and crashes agentgateway just as fast -
+# confirmed live 2026-09-11, see compose.yaml's own comment on this exact
+# env block) so the very first boot never sees an unset OR null var; real
+# values are pushed moments later, in the same apply.sh deploy run, by
+# apply_installation_service_env(). See that function and
+# install_agentgateway_config() in apply.sh for where each value comes from.
+#
+# file mode (the default) lets a write through agentgateway's own UI/API
+# save into this file - wrong for us, since this file is IaC and any such
+# write would vanish on the next install_agentgateway_config() run anyway.
+# readOnly makes that intent explicit and gets a clean 403 ("UI is
+# configured as read-only") instead of a raw filesystem error from the
+# read-only bind mount (confirmed against agentgateway's own storage-mode
+# docs - the two would otherwise behave the same, since the mount actually
+# is read-only either way).
+config:
+  storage:
+    mode: readOnly
+
+# Just one named gateway: port 4000, published through nginx, carries both
+# the LLM API (llm:) and the admin console (ui:). Port 15000 is NOT defined
+# here - it doesn't need to be. It's agentgateway's own separate, built-in
+# admin/runtime-API interface (config.adminAddr), bound to localhost inside
+# the container by its own default and never published in compose.yaml;
+# adding a second named `gateways` entry on the same port would just
+# conflict with that built-in listener, not replace or extend it.
+gateways:
+  default:
+    port: 4000
+
+# The single model surface for every consumer (OpenWebUI/OpenClaw) -
+# fronts lmstudio-proxy, not lmstudio directly, so every caller inherits its
+# tool-call compat fixes (see compose.yaml's lmstudio-proxy comment). No
+# external providers (Anthropic/OpenAI) are configured - agentgateway does
+# not support subscription/session auth for Claude Code or ChatGPT Plus, only
+# static API keys or cloud IAM, so there is nothing meaningful to add there.
+llm:
+  providers:
+    - name: lmstudio
+      provider: openAI
+      params:
+        baseUrl: http://lmstudio-proxy:11234/v1
+        # LM Studio's OpenAI-compatible server does not check this value: it
+        # accepts any non-empty bearer, matching the placeholder OpenWebUI
+        # already uses when talking to LM Studio directly today.
+        apiKey: lmstudio
+  models:
+    - name: "*"
+      provider:
+        reference: lmstudio
+  # Machine-to-machine access for the three services that call this surface
+  # directly. There is no browser/human traffic here (humans go through
+  # OpenWebUI's own already-OIDC-gated chat UI, which then calls this API
+  # with its own service token) - a static per-service bearer key is the
+  # least machinery that actually fits, and is a straight drop-in for the
+  # `api_key` field every OpenAI-compatible client here already has.
+  policies:
+    apiKey:
+      mode: strict
+      location:
+        header:
+          name: authorization
+          prefix: 'Bearer '
+      keys:
+        - key: $AGENTGATEWAY_OPENWEBUI_TOKEN
+          metadata:
+            name: openwebui
+        - key: $AGENTGATEWAY_OPENCLAW_TOKEN
+          metadata:
+            name: openclaw
+
+# Read-only admin/observability console (route + backend introspection) -
+# not a config editor, agentgateway's real configuration is this file. This
+# is the one part of agentgateway a human ever browses to directly, so it is
+# the one place real groups-based CEL RBAC actually applies: the Authentik
+# application below is bound to ai-admins only (matching the
+# operational-tool precedent already set by Portainer/MetaMCP in this
+# repo), and the CEL rule re-checks the same group from the groups claim
+# agentgateway receives - the mechanism the ai-admins/ai-users/ai-api-clients
+# split was asked for, demonstrated where it is actually meaningful.
+ui:
+  # Bare scalar, not a list - matches the exact shape agentgateway's own
+  # binary writes when it generates a config (confirmed against its Docker
+  # quickstart docs), not just the schema's "array of refs" description.
+  gateways: default
+  policies:
+    oidc:
+      issuer: $AGENTGATEWAY_OIDC_ISSUER_URL
+      clientId: agentgateway
+      clientSecret: $AUTHENTIK_AGENTGATEWAY_CLIENT_SECRET
+      redirectURI: $AGENTGATEWAY_OIDC_REDIRECT_URI
+      scopes:
+        - profile
+        - email
+    authorization:
+      rules:
+        - allow: "'ai-admins' in jwt.groups"
+
+# No MCP configuration here by design - MetaMCP remains the single point of
+# MCP aggregation for the whole stack (see the "Судьба MetaMCP" section of
+# the agentgateway plan). agentgateway's `mcp:` top-level key is deliberately
+# never used in this file.

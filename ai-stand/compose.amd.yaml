@@ -1,0 +1,30 @@
+services:
+  lmstudio:
+    image: ghcr.io/kukurusik/ai-stand-lmstudio:2026.09.12-1-amd
+    environment:
+      AI_SUPPLEMENTAL_GIDS: "44:993"
+      AMD_VISIBLE_DEVICES: all
+      # LM Studio does not expose all llama.cpp runtime flags through `lms load`.
+      # The service entrypoint wraps llama-server and appends these stability
+      # flags for large Qwen Q8 models. Originally tuned against the ROCm
+      # backend; carried over as-is to Vulkan below (not yet independently
+      # re-validated there, but hasn't caused any issue in testing).
+      LMSTUDIO_LLAMA_SERVER_STRIP_ARGS: --mmproj --flash-attn --batch-size --ubatch-size
+      LMSTUDIO_LLAMA_SERVER_EXTRA_ARGS: --no-mmap --no-repack --flash-attn on --batch-size 512 --ubatch-size 512
+      LMSTUDIO_ACCELERATOR: amd
+      LMSTUDIO_GPU: max
+      # Vulkan (Mesa RADV), not ROCm/HIP - confirmed live 2026-09-05 that
+      # qwen3.6-35b-a3b at context 262144 survives real inference under
+      # Vulkan + kernel 7.0.0 (linux-generic-hwe-24.04), where the ROCm
+      # backend crashes under real load regardless of kernel version, ROCm
+      # release, or GTT/TTM tuning (see project_ai_stand_gpu_crash_investigation
+      # memory notes) - both runtimes are baked into this image either way
+      # (docker/lmstudio/Dockerfile's "amd-vulkan" install stage), so this is a
+      # config-only switch, no rebuild needed to go back to ROCm if needed.
+      LMSTUDIO_RUNTIME_ID: llama.cpp-linux-x86_64-vulkan-avx2
+      LMSTUDIO_RUNTIME_MANIFEST: /opt/lmstudio-runtime-manifests/amd-vulkan
+      LMSTUDIO_RUNTIME_PROFILE: amd
+    deploy:
+      placement:
+        constraints:
+          - node.labels.ai-stand.accelerator == amd

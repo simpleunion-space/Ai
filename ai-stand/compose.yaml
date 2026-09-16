@@ -1,0 +1,1110 @@
+x-common-environment: &common-environment
+  HOME: /home/ai
+  IM_GID: "20000"
+  IM_TZ: Europe/Moscow
+  IM_UID: "10000"
+
+x-model-environment: &model-environment
+  LMSTUDIO_CONTEXT_LENGTH: "8192"
+  LMSTUDIO_MODEL: qwen/qwen3-1.7b@q8_0
+  # Must equal LMSTUDIO_MODEL with everything from "@" on stripped
+  # (service-entrypoint.sh's own LMSTUDIO_MODEL_KEY derivation,
+  # "${LMSTUDIO_MODEL%%@*}") - lms load is called with this as both the
+  # catalog key and the --identifier, and a mismatch here makes LM Studio
+  # list the same weights as two separate /v1/models rows (see the
+  # identical rule and incident note in
+  # installations/kurkin-family__labs__m01/apply-model-profile.sh, whose
+  # own CHAT_MODEL_IDENTIFIER follows this exact same derivation). Found
+  # 2026-09-13: this value used to be a hand-picked "qwen3-1.7b-q8" that
+  # didn't actually match that derivation - fixed here, keep it derived by
+  # hand the same way on any future LMSTUDIO_MODEL change.
+  LMSTUDIO_MODEL_IDENTIFIER: qwen/qwen3-1.7b
+  LMSTUDIO_PARALLEL: "1"
+  OPENCLAW_MAX_TOKENS: "4096"
+
+x-embedding-environment: &embedding-environment
+  LMSTUDIO_EMBEDDING_CONTEXT_LENGTH: "8192"
+  LMSTUDIO_EMBEDDING_DIMENSIONS: "1024"
+  # Keep every model execution in the one GPU-backed LM Studio instance. The
+  # installation profile may replace the weights/dimensions, but embeddings
+  # are intentionally never sent to a second CPU inference service.
+  # lms load expects a numeric GPU offload ratio; 1 means full offload.
+  LMSTUDIO_EMBEDDING_GPU: "1"
+  LMSTUDIO_EMBEDDING_MODEL: https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-Q8_0.gguf
+  LMSTUDIO_EMBEDDING_MODEL_KEY: text-embedding-qwen3-embedding-0.6b
+  LMSTUDIO_EMBEDDING_MODEL_IDENTIFIER: qwen3-embedding-0.6b-q8
+
+x-openclaw-environment: &openclaw-environment
+  <<: [*common-environment, *model-environment]
+  # OPENCLAW_GATEWAY_TOKEN comes from a mounted Docker secret via an
+  # entrypoint-side shim (docker/openclaw/entrypoint.sh reads
+  # OPENCLAW_GATEWAY_TOKEN_FILE and exports the real var before init.mjs
+  # runs), not a plain env var - see the openclaw-gateway service's
+  # `secrets:` block below.
+  OPENCLAW_GATEWAY_TOKEN_FILE: /run/secrets/ai-stand-openclaw-gateway-token
+  # Same _FILE indirection as OPENCLAW_GATEWAY_TOKEN above, and for the same
+  # reason: init.mjs's required() throws on empty, so this cannot be a
+  # deferred plain env var (see ensure_ai_stand_secrets()'s comment on this
+  # secret in apply.sh).
+  AGENTGATEWAY_TOKEN_FILE: /run/secrets/ai-stand-agentgateway-openclaw-token
+  AI_WRITABLE_PATHS: /home/ai
+  # Points the sandbox "docker" backend (agents.defaults.sandbox.*, set in
+  # docker/openclaw/init.mjs) at the isolated dind sidecar below, not the
+  # host's real Docker socket - openclaw-gateway has no other Docker access
+  # at all (see openclaw-sandbox-dind's own comment for why).
+  DOCKER_HOST: tcp://openclaw-sandbox-dind:2375
+  NODE_EXTRA_CA_CERTS: /etc/ssl/certs/ca-certificates.crt
+  OPENCLAW_CONFIG_PATH: /home/ai/.openclaw/openclaw.json
+  OPENCLAW_DISABLE_BONJOUR: "1"
+  OPENCLAW_GATEWAY_PORT: "18789"
+  OPENCLAW_HOME: /home/ai
+  # Goes through agentgateway, not LM Studio directly, using OpenClaw's
+  # dedicated service bearer token (see agentgateway/config.yaml).
+  OPENCLAW_LMSTUDIO_BASE_URL: http://agentgateway:4000/v1
+  # Installation profiles opt in with OPENCLAW_LANCEDB_ENABLED=1 and provide
+  # the profiled model id/dimensions. Keeping this generic default disabled
+  # avoids changing an existing persistent memory index during generic deploy
+  # before model-apply has installed the installation-specific profile.
+  OPENCLAW_LANCEDB_ENABLED: "0"
+  OPENCLAW_LANCEDB_DB_PATH: /home/ai/.openclaw/memory/lancedb
+  OPENCLAW_LANCEDB_PLUGIN_VERSION: "2026.9.4"
+  # Codex is a managed OpenClaw plugin, not a standalone ai-stand service.
+  # entrypoint.sh installs this pinned version before init.mjs configures it.
+  OPENCLAW_CODEX_PLUGIN_VERSION: "2026.9.4"
+  # Keep the generic installation conservative. Installation profiles may
+  # explicitly select "autonomous" for Codex tasks that are confined to the
+  # OpenClaw runtime and its Docker-in-Docker daemon.
+  OPENCLAW_CODEX_EXECUTION_PROFILE: guardian
+  # One model request may spend a long time on local prefill, reasoning, or
+  # streaming. init.mjs writes this to models.providers.lmstudio.timeoutSeconds.
+  OPENCLAW_PROVIDER_TIMEOUT_SECONDS: "86400"
+  OPENCLAW_PUBLIC_ORIGIN: https://openclaw.local
+  OPENCLAW_STATE_DIR: /home/ai/.openclaw
+  OPENCLAW_TRUSTED_PROXIES: 172.18.0.1
+  OPENCLAW_WORKSPACE_DIR: /home/ai/.openclaw/workspace
+  TERM: xterm-256color
+
+x-openwebui-environment: &openwebui-environment
+  # OAUTH_CLIENT_SECRET is generated per-installation and pushed after
+  # deploy by apply_installation_service_env() as a plain env var - Open
+  # WebUI has no file:// / _FILE indirection for it yet (upstream issue
+  # open, unmerged as of v0.11.3). WEBUI_SECRET_KEY instead comes from a
+  # mounted Docker secret (WEBUI_SECRET_KEY_FILE, supported since v0.11.3
+  # via open-webui/open-webui#14766) - see the openwebui service's
+  # `secrets:` block below. Open WebUI's own start.sh is get-or-create for
+  # this path (generates and WRITES the file itself if missing) - that
+  # write would fail against a real (read-only) Swarm secret mount, so
+  # this only works because ensure_ai_stand_secrets() in apply.sh
+  # guarantees the secret already has real content before `stack deploy`
+  # ever runs (see cmd_deploy()) - don't reorder those two calls.
+  WEBUI_SECRET_KEY_FILE: /run/secrets/ai-stand-openwebui-secret-key
+  ENABLE_EVALUATION_ARENA_MODELS: "False"
+  ENABLE_FOLLOW_UP_GENERATION: "False"
+  ENABLE_LOGIN_FORM: "False"
+  ENABLE_OLLAMA_API: "False"
+  ENABLE_OPENAI_API: "True"
+  ENABLE_OAUTH_PERSISTENT_CONFIG: "False"
+  ENABLE_OAUTH_ROLE_MANAGEMENT: "True"
+  ENABLE_OAUTH_SIGNUP: "True"
+  ENABLE_PERSISTENT_CONFIG: "False"
+  ENABLE_RETRIEVAL_QUERY_GENERATION: "False"
+  ENABLE_SEARCH_QUERY_GENERATION: "False"
+  ENABLE_TAGS_GENERATION: "False"
+  ENABLE_TITLE_GENERATION: "False"
+  # Must match LMSTUDIO_MODEL_IDENTIFIER above (see its comment).
+  DEFAULT_MODELS: qwen/qwen3-1.7b
+  OAUTH_ADMIN_ROLES: ai-admins
+  OAUTH_ALLOWED_ROLES: ai-users,ai-admins
+  OAUTH_AUTO_REDIRECT: "True"
+  OAUTH_CLIENT_ID: openwebui
+  OAUTH_MERGE_ACCOUNTS_BY_EMAIL: "True"
+  OAUTH_PROVIDER_NAME: Authentik
+  OAUTH_ROLES_CLAIM: groups
+  OAUTH_SCOPES: openid email profile groups
+  # Goes through agentgateway, not lmstudio directly (see
+  # agentgateway/config.yaml) - the api_key placeholders below are
+  # overwritten within seconds of every deploy by
+  # apply_installation_service_env()/apply-model-profile.sh with the real
+  # per-installation agentgateway token, same as today; they only matter for
+  # this container's first few seconds of life.
+  OPENAI_API_BASE_URLS: http://agentgateway:4000/v1
+  # model_ids[0] must also match LMSTUDIO_MODEL_IDENTIFIER above.
+  OPENAI_API_CONFIGS: '{"0":{"enable":true,"base_url":"http://agentgateway:4000/v1","api_key":"pending-profile-apply","model_ids":["qwen/qwen3-1.7b"]}}'
+  OPENAI_API_KEYS: pending-profile-apply
+  OPENID_PROVIDER_URL: https://authentik.local/application/o/openwebui/.well-known/openid-configuration
+  OPENID_REDIRECT_URI: https://openwebui.local/oauth/oidc/callback
+  RAG_EMBEDDING_ENGINE: openai
+  RAG_EMBEDDING_MODEL: qwen3-embedding-0.6b-q8
+  RAG_EMBEDDING_MODEL_AUTO_UPDATE: "False"
+  RAG_OPENAI_API_BASE_URL: http://lmstudio:1234/v1
+  RAG_OPENAI_API_KEY: lmstudio
+  SCARF_NO_ANALYTICS: "True"
+  TZ: Europe/Moscow
+  WEBUI_AUTH: "True"
+  WEBUI_URL: https://openwebui.local
+
+x-authentik-environment: &authentik-environment
+  AI_WRITABLE_PATHS: /data:/templates
+  # Kept in sync by hand with apply.sh's PORTAINER_OAUTH_ADMIN_USERS, which
+  # references this same address to recognize akadmin as Portainer's OIDC
+  # admin - the two aren't derived from one another, same kind of gotcha as
+  # TECH_PORTS/install_docker_user_helper()'s own hardcoded port list.
+  AUTHENTIK_BOOTSTRAP_EMAIL: authentik@ai-stand.local
+  AUTHENTIK_BOOTSTRAP_PASSWORD: file:///run/secrets/ai-stand-authentik-bootstrap-password
+  AUTHENTIK_BOOTSTRAP_TOKEN: file:///run/secrets/ai-stand-authentik-bootstrap-token
+  # Kept in sync by hand with apply.sh's AUTHENTIK_BOOTSTRAP_USERNAME constant,
+  # used to display/reference the same account (e.g. cmd_credentials) - not
+  # derived from one another, same kind of gotcha as AUTHENTIK_BOOTSTRAP_EMAIL
+  # above.
+  AUTHENTIK_BOOTSTRAP_USERNAME: akadmin
+  AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+  AUTHENTIK_HOST_BROWSER: https://authentik.local
+  # authentik 2026.5+ defaults this to the IPv6 wildcard [::]; ai-network is IPv4-only
+  # (EnableIPv6=false), so leaving the default would risk the port never binding at all.
+  AUTHENTIK_LISTEN__HTTP: "0.0.0.0:9000"
+  # authentik 2026.8+ only trusts X-Forwarded-Proto/Host/For when the connecting
+  # peer is in this list - and treats a present-but-untrusted header as spoofing,
+  # returning 404 rather than merely ignoring it. nginx (native on the host) dials
+  # authentik-server via 127.0.0.1:19001, but that's a Docker host-mode published
+  # port: docker-proxy rewrites the peer address, so authentik actually sees the
+  # connection arrive from the docker_gwbridge gateway, not literally 127.0.0.1.
+  # Confirmed via authentik's own request logs ("remote": "172.18.0.1").
+  AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS: "172.18.0.0/16,127.0.0.1/32,::1/128"
+  AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
+  AUTHENTIK_POSTGRESQL__NAME: authentik
+  AUTHENTIK_POSTGRESQL__PASSWORD: file:///run/secrets/ai-stand-authentik-postgres-password
+  AUTHENTIK_POSTGRESQL__USER: authentik
+  AUTHENTIK_REDIS__HOST: authentik-redis
+  AUTHENTIK_SECRET_KEY: file:///run/secrets/ai-stand-authentik-secret-key
+  IM_GID: "20000"
+  IM_TZ: Europe/Moscow
+  IM_UID: "10000"
+
+x-ai-security: &ai-security
+  cap_drop:
+    - ALL
+  cap_add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - SETGID
+    - SETUID
+  security_opt:
+    - no-new-privileges:true
+
+x-ai-update: &ai-update
+  parallelism: 1
+  delay: 10s
+  failure_action: rollback
+  monitor: 3h5m
+  order: stop-first
+
+x-ai-rollback: &ai-rollback
+  parallelism: 1
+  delay: 10s
+  monitor: 3h5m
+  order: stop-first
+
+# lmstudio and openclaw-gateway get their active model swapped out-of-band by
+# apply-model-profile.sh's model-apply (a docker service update after the
+# fact, not a compose-declared value) - a large model can legitimately keep
+# crash-looping for a while under real load without that meaning the *update*
+# itself was bad. failure_action: rollback would otherwise silently revert
+# LMSTUDIO_MODEL back to whatever was running before model-apply (observed
+# 2026-09-05: looks exactly like "restarting the container switched back to
+# the small model"). continue + the services' own restart_policy just keeps
+# retrying with the current (large) model instead.
+x-ai-update-no-rollback: &ai-update-no-rollback
+  parallelism: 1
+  delay: 10s
+  failure_action: continue
+  monitor: 3h5m
+  order: stop-first
+
+services:
+  authentik-postgresql:
+    image: docker.io/library/postgres:18-alpine
+    user: "10000:20000"
+    environment:
+      POSTGRES_DB: authentik
+      POSTGRES_PASSWORD_FILE: /run/secrets/ai-stand-authentik-postgres-password
+      POSTGRES_USER: authentik
+      TZ: Europe/Moscow
+    secrets:
+      - source: ai-stand-authentik-postgres-password
+        target: ai-stand-authentik-postgres-password
+        mode: 0444
+    volumes:
+      # postgres 18's image dropped the old /var/lib/postgresql/data convention in favor
+      # of a single mount at /var/lib/postgresql, under which it manages its own
+      # major-version-specific subdirectory (pg_ctlcluster-style) - mounting at the old
+      # "data" path makes the entrypoint refuse to start (treats it as leftover pre-18 data).
+      - type: bind
+        source: /mnt/storage/authentik-data/postgresql
+        target: /var/lib/postgresql
+    networks:
+      ai-network:
+        aliases:
+          - authentik-postgresql
+          - authentik-db
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U authentik -d authentik
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.authentik == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 2m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 2m
+        order: stop-first
+
+  authentik-redis:
+    image: docker.io/library/redis:8.10-alpine
+    user: "10000:20000"
+    command:
+      - redis-server
+      - --save
+      - "60"
+      - "1"
+      - --loglevel
+      - warning
+    volumes:
+      - type: bind
+        source: /mnt/storage/authentik-data/redis
+        target: /data
+    networks:
+      ai-network:
+        aliases:
+          - authentik-redis
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.authentik == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 2m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 2m
+        order: stop-first
+
+  authentik-server:
+    <<: *ai-security
+    # CAP_FOWNER: `ak healthcheck` (this service's own Docker HEALTHCHECK
+    # command) chmod's /data on every invocation - confirmed live 2026-09-13,
+    # the first restart under cap_drop: ALL (just added by this same audit)
+    # failed every single health check with "chmod: changing permissions of
+    # '/data': Operation not permitted", leaving the service stuck in
+    # "starting" forever (the container itself runs and serves real traffic
+    # fine - only the discrete healthcheck exec fails). Same root cause and
+    # same fix as openclaw-gateway's own CAP_FOWNER below.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+      - FOWNER
+    image: ghcr.io/kukurusik/ai-stand-authentik:2026.09.15-1
+    command:
+      - ak
+      - server
+    environment: *authentik-environment
+    secrets:
+      - source: ai-stand-authentik-secret-key
+        target: ai-stand-authentik-secret-key
+        mode: 0444
+      - source: ai-stand-authentik-postgres-password
+        target: ai-stand-authentik-postgres-password
+        mode: 0444
+      - source: ai-stand-authentik-bootstrap-token
+        target: ai-stand-authentik-bootstrap-token
+        mode: 0444
+      - source: ai-stand-authentik-bootstrap-password
+        target: ai-stand-authentik-bootstrap-password
+        mode: 0444
+    volumes:
+      - type: bind
+        source: /mnt/storage/authentik-data/server/data
+        target: /data
+      - type: bind
+        source: /mnt/storage/authentik-data/server/templates
+        target: /templates
+    ports:
+      - target: 9000
+        published: 19001
+        protocol: tcp
+        mode: host
+    networks:
+      ai-network:
+        aliases:
+          - authentik
+          - authentik-server
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - ak
+        - healthcheck
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.authentik == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 10m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 10m
+        order: stop-first
+
+  authentik-worker:
+    <<: *ai-security
+    # CAP_FOWNER: same reasoning as authentik-server above - `ak healthcheck`
+    # chmod's /data regardless of which `ak` subcommand the container itself
+    # runs, confirmed to hit this worker identically.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+      - FOWNER
+    image: ghcr.io/kukurusik/ai-stand-authentik:2026.09.15-1
+    command:
+      - ak
+      - worker
+    environment: *authentik-environment
+    secrets:
+      - source: ai-stand-authentik-secret-key
+        target: ai-stand-authentik-secret-key
+        mode: 0444
+      - source: ai-stand-authentik-postgres-password
+        target: ai-stand-authentik-postgres-password
+        mode: 0444
+      - source: ai-stand-authentik-bootstrap-token
+        target: ai-stand-authentik-bootstrap-token
+        mode: 0444
+      - source: ai-stand-authentik-bootstrap-password
+        target: ai-stand-authentik-bootstrap-password
+        mode: 0444
+    volumes:
+      - type: bind
+        source: /mnt/storage/authentik-data/server/data
+        target: /data
+      - type: bind
+        source: /mnt/storage/authentik-data/server/templates
+        target: /templates
+    networks:
+      ai-network:
+        aliases:
+          - authentik-worker
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - ak
+        - healthcheck
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.authentik == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 10m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 10m
+        order: stop-first
+
+  lmstudio:
+    <<: *ai-security
+    image: ghcr.io/kukurusik/ai-stand-lmstudio:2026.09.12-1-cpu
+    environment:
+      <<: [*common-environment, *model-environment, *embedding-environment]
+      AI_WRITABLE_PATHS: /home/ai
+      LMSTUDIO_ACCELERATOR: cpu
+      LMSTUDIO_GPU: off
+      LMSTUDIO_PORT: "1234"
+      LMSTUDIO_RUNTIME_ID: llama.cpp-linux-x86_64-avx2
+      LMSTUDIO_RUNTIME_MANIFEST: /opt/lmstudio-runtime-manifests/cpu
+      LMSTUDIO_RUNTIME_PROFILE: cpu
+      LMSTUDIO_SEED_HOME: /opt/lmstudio-seed
+    volumes:
+      - type: bind
+        source: /mnt/storage/lmstudio-data/lmstudio
+        target: /home/ai
+    ports:
+      - target: 1234
+        published: 1234
+        protocol: tcp
+        mode: host
+    networks:
+      ai-network:
+        aliases:
+          - lmstudio
+    stop_grace_period: 1m
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/bin/lmstudio-healthcheck.sh
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.lmstudio == true
+      restart_policy:
+        condition: any
+        delay: 30s
+      update_config: *ai-update-no-rollback
+      rollback_config: *ai-rollback
+
+  lmstudio-proxy:
+    <<: *ai-security
+    image: ghcr.io/kukurusik/ai-stand-lmstudio-proxy:2026.09.15-1
+    environment:
+      <<: *common-environment
+      AI_WRITABLE_PATHS: /home/ai
+      LMSTUDIO_PROXY_DEBUG: "0"
+      LMSTUDIO_PROXY_HOST: 0.0.0.0
+      LMSTUDIO_PROXY_PORT: "11234"
+      LMSTUDIO_PROXY_UPSTREAM_BASE_URL: http://lmstudio:1234/v1
+      LMSTUDIO_PROXY_STRIP_TOOLS_AFTER_RESULT_ENABLED: "0"
+      LMSTUDIO_PROXY_FLATTEN_TOOL_RESULT_CONTENT_ENABLED: "0"
+      # server.mjs's own default (300000/5min) is too tight for this
+      # installation's reasoning models on a large context - confirmed live
+      # 2026-09-11 via agentgateway's own access logs: a real OpenClaw
+      # session (79k+ input tokens, qwen/qwen3.8-27b) hit exactly
+      # duration=300007ms and got cut mid-stream ("proxy error: error from
+      # user's Body stream"), surfacing to the user as "The agent run
+      # failed before producing a reply." A different request in the same
+      # session legitimately took 165778ms and succeeded - 5 minutes is not
+      # a generous margin above that. Keep the proxy's total upstream lifetime
+      # aligned with OpenClaw's 24-hour provider request limit so a long local
+      # prefill or stream is not cut off after 30 minutes.
+      LMSTUDIO_PROXY_UPSTREAM_TIMEOUT_MS: "86400000"
+      # Kept equal to the total request budget: a local model may spend a
+      # long time producing its first token or between stream chunks.
+      LMSTUDIO_PROXY_UPSTREAM_IDLE_TIMEOUT_MS: "86400000"
+    ports:
+      - target: 11234
+        published: 11234
+        protocol: tcp
+        mode: host
+    networks:
+      ai-network:
+        aliases:
+          - lmstudio-proxy
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - http://127.0.0.1:11234/healthz
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.lmstudio == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config: *ai-update
+      rollback_config: *ai-rollback
+
+  openclaw-gateway:
+    <<: *ai-security
+    # CAP_FOWNER: the openclaw CLI's own state/db layer tries to (re-)harden permissions on its
+    # sqlite files on every invocation. The running gateway process (uid 10000 via gosu, owns its
+    # own files) never needs this, but a manual `docker exec` (which lands as uid 0 with no path
+    # through the entrypoint's gosu step) does — without CAP_FOWNER, root can't chmod files it
+    # doesn't own, so every CLI invocation via manual exec logs a non-fatal EPERM warning.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+      - FOWNER
+    image: ghcr.io/kukurusik/ai-stand-openclaw:2026.09.15-1
+    environment: *openclaw-environment
+    secrets:
+      - source: ai-stand-openclaw-gateway-token
+        target: ai-stand-openclaw-gateway-token
+        mode: 0444
+      - source: ai-stand-agentgateway-openclaw-token
+        target: ai-stand-agentgateway-openclaw-token
+        mode: 0444
+    volumes:
+      - type: bind
+        source: /mnt/storage/openclaw-data/gateway
+        target: /home/ai
+    ports:
+      - target: 18789
+        published: 18789
+        protocol: tcp
+        mode: host
+    networks:
+      ai-network:
+        aliases:
+          - openclaw
+          - openclaw-gateway
+      openclaw-sandbox-network: {}
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - http://127.0.0.1:18789/healthz
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # A newly reset Gateway must install managed Codex/LanceDB packages into
+      # its empty persistent state before it can bind the health endpoint. The
+      # previous five-minute grace period let Swarm terminate that first install
+      # mid-flight and retry it forever. This is only initial health-check
+      # grace; normal check interval, timeout and retry behaviour are unchanged.
+      start_period: 15m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.openclaw == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config: *ai-update-no-rollback
+      rollback_config: *ai-rollback
+
+  # openclaw-sandbox-dind is NOT a Swarm service - Swarm's task API cannot
+  # grant `privileged`, which a dind daemon has no working substitute for.
+  # It runs as a plain host-level `docker run` container on linux01, managed
+  # by a dedicated systemd unit (ensure_openclaw_sandbox_dind_service in
+  # apply.sh), attached to openclaw-sandbox-network above with the same
+  # `openclaw-sandbox-dind` alias openclaw-gateway's DOCKER_HOST expects.
+
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:v0.11.3
+    environment: *openwebui-environment
+    secrets:
+      - source: ai-stand-openwebui-secret-key
+        target: ai-stand-openwebui-secret-key
+        mode: 0444
+    volumes:
+      - type: bind
+        source: /mnt/storage/openwebui-data/server
+        target: /app/backend/data
+    ports:
+      - target: 8080
+        published: 18080
+        protocol: tcp
+        mode: host
+    networks:
+      ai-network:
+        aliases:
+          - openwebui
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/", timeout=5).read(1)' 2>/dev/null || python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/", timeout=5).read(1)'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.openwebui == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      # continue, not rollback - same reasoning as lmstudio/openclaw-gateway's
+      # x-ai-update-no-rollback above: model-apply updates this service's
+      # model-selection env out-of-band too, and a rollback here would silently
+      # revert Open WebUI back to referencing the small model.
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: continue
+        monitor: 30m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 30m
+        order: stop-first
+
+  portainer-agent:
+    image: portainer/agent:2.45.0
+    environment:
+      AGENT_CLUSTER_ADDR: tasks.portainer-agent
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+      - type: bind
+        source: /var/lib/docker/volumes
+        target: /var/lib/docker/volumes
+    networks:
+      portainer-agent-network:
+        aliases:
+          - portainer-agent
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.platform.os == linux
+      restart_policy:
+        condition: any
+        delay: 5s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: stop-first
+
+  portainer:
+    image: portainer/portainer-ce:2.45.0
+    user: "10000:20000"
+    command:
+      # No `-H tcp://tasks.portainer-agent:9001` / --tlsskipverify here:
+      # ensure_portainer_endpoint() in apply.sh already registers this
+      # exact address as the "ai-stand-swarm" environment over the API
+      # (POST /api/endpoints), with its own TLS settings. Passing -H on
+      # the server's own command line ALSO auto-registers it as a second,
+      # separate environment named "primary" on a fresh database -
+      # confirmed live 2026-09-10 after reinstalling Portainer from
+      # scratch: both entries pointed at the identical agent address, and
+      # "primary" (Id 1) existed before ensure_portainer_endpoint() ever
+      # ran (which created "ai-stand-swarm" as Id 3). This had never
+      # surfaced before since Portainer's database had never actually
+      # been empty until that reinstall.
+      # portainer_init_admin() in apply.sh bootstraps the admin account
+      # directly over the API (POST /api/users/admin/init), not through
+      # the interactive setup screen the setup-token guards - confirmed
+      # live 2026-09-09 against 2.45.0, a fresh instance's first
+      # /api/users/admin/init call fails with HTTP 403 ("Invalid or
+      # missing setup token") without this flag.
+      - --no-setup-token
+    environment:
+      TZ: Europe/Moscow
+    volumes:
+      - type: bind
+        source: /mnt/storage/portainer-data/server
+        target: /data
+    ports:
+      - target: 9443
+        published: 9443
+        protocol: tcp
+        mode: host
+    networks:
+      portainer-agent-network:
+        aliases:
+          - portainer
+    cap_drop:
+      - ALL
+    stop_grace_period: 30s
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+          - node.labels.ai-stand.portainer == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 1m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 1m
+        order: stop-first
+
+  metamcp-postgres:
+    # MetaMCP's own upstream compose.yml pins postgres:16-alpine, but ships
+    # a plain drizzle-orm schema with nothing 16-specific - bumped to match
+    # authentik-postgresql's version for consistency across the stack.
+    image: docker.io/library/postgres:18-alpine
+    user: "10000:20000"
+    environment:
+      POSTGRES_DB: metamcp
+      POSTGRES_PASSWORD_FILE: /run/secrets/ai-stand-metamcp-postgres-password
+      POSTGRES_USER: metamcp
+      TZ: Europe/Moscow
+    secrets:
+      - source: ai-stand-metamcp-postgres-password
+        target: ai-stand-metamcp-postgres-password
+        mode: 0444
+    volumes:
+      # postgres 18 manages its own major-version-specific subdirectory
+      # under a single /var/lib/postgresql mount - see the identical note
+      # on authentik-postgresql above.
+      - type: bind
+        source: /mnt/storage/metamcp-data/postgres
+        target: /var/lib/postgresql
+    networks:
+      ai-network:
+        aliases:
+          - metamcp-postgres
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U metamcp -d metamcp
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.metamcp == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 2m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 2m
+        order: stop-first
+
+  metamcp:
+    image: ghcr.io/metatool-ai/metamcp:2.4.22
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: errors-only
+      POSTGRES_HOST: metamcp-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: metamcp
+      POSTGRES_DB: metamcp
+      # POSTGRES_PASSWORD, DATABASE_URL, BETTER_AUTH_SECRET and
+      # BOOTSTRAP_USER_PASSWORD are generated per-installation and pushed
+      # after deploy by apply_installation_service_env(); MetaMCP has no
+      # file:// / _FILE indirection for its own env vars, so unlike
+      # metamcp-postgres above these can't go through a mounted secret.
+      APP_URL: https://metamcp.local
+      NEXT_PUBLIC_APP_URL: https://metamcp.local
+      TRANSFORM_LOCALHOST_TO_DOCKER_INTERNAL: "true"
+      BOOTSTRAP_ENABLE: "true"
+      BOOTSTRAP_ONLY_FIRST_RUN: "true"
+      # This is a single-admin homelab tool, not a multi-tenant app - nobody
+      # but the provisioned admin should ever be able to create an account.
+      # In v2.4.22 this flag does not itself block /register or the sign-up API.
+      # The installation's public nginx route returns 404 for those paths while
+      # bootstrap provisioning uses the internal ai-network endpoint. Keep this
+      # enabled too, so an upstream implementation becomes defence in depth.
+      BOOTSTRAP_DISABLE_REGISTRATION_UI: "true"
+      BOOTSTRAP_USER_NAME: admin
+      # OIDC_CLIENT_SECRET, OIDC_DISCOVERY_URL and OIDC_AUTHORIZATION_URL are
+      # generated/resolved per-installation and pushed after deploy by
+      # apply_installation_service_env(), same as the other secrets above.
+      # This only gates the admin-UI login (Better Auth) - MCP client
+      # endpoints keep using their own per-endpoint bearer API keys.
+      OIDC_CLIENT_ID: metamcp
+      # MetaMCP's own login page (apps/frontend/app/[locale]/login/page.tsx)
+      # hardcodes a lookup for a provider with id === "oidc" to decide
+      # whether to render the SSO button at all - confirmed live 2026-09-05
+      # that any other OIDC_PROVIDER_ID value (e.g. "authentik") leaves the
+      # button permanently hidden even though the backend OAuth flow itself
+      # works. Must be exactly "oidc".
+      OIDC_PROVIDER_ID: oidc
+      OIDC_SCOPES: openid email profile
+      OIDC_PKCE: "true"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - target: 12008
+        published: 12008
+        protocol: tcp
+        mode: host
+    networks:
+      ai-network:
+        aliases:
+          - metamcp
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - http://127.0.0.1:12008/health
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.metamcp == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config: *ai-update
+      rollback_config: *ai-rollback
+
+  # Unified OIDC auth + model gateway, fronting lmstudio-proxy only - see
+  # agentgateway/config.yaml for the actual routing/auth/RBAC config. No MCP
+  # here at all, that stays MetaMCP's job (see the metamcp service above).
+  agentgateway:
+    image: cr.agentgateway.dev/agentgateway:v1.5.0
+    # Without an explicit -f, agentgateway's default /config auto-discovery
+    # mode requires the /config DIRECTORY itself to be writable (it wants to
+    # be able to generate a default config + SQLite db there if none
+    # exists) - confirmed live: "/config exists but is not writable; make
+    # it writable, pass --file, or pass --config". That directory is just a
+    # mountpoint Docker created to hold the read-only file bind-mounted
+    # below, owned by root and not writable by this image's non-root
+    # runtime user - and it should stay that way (this file is IaC, see its
+    # own header and config.storage.mode: readOnly). -f switches to
+    # explicit-single-file mode, which only needs read access to the file
+    # itself.
+    command: ["-f", "/config/config.yaml"]
+    # Overrides the image's own default UID (65532, a distroless-style
+    # fixed non-root user) with this repo's service/storage convention
+    # (IM_UID/IM_GID, matching x-common-environment below). Without this,
+    # the directory bind-mounted below - owned by service:storage 0750,
+    # like every other component's data directory (see
+    # AGENTGATEWAY_DATA_ROOT/migrate_root_data_to_component in apply.sh) -
+    # would be unreadable by the container's actual runtime user. Chainguard
+    # nonroot-style images are built to support running as an arbitrary
+    # UID for exactly this kind of override (agentgateway's own Docker
+    # quickstart does the same with `--user "$(id -u):$(id -g)"`).
+    user: "10000:20000"
+    environment:
+      TZ: Europe/Moscow
+      # Placeholders, real values pushed moments later in the same
+      # apply.sh deploy run by apply_installation_service_env() - none of
+      # these actually needs cmd_configure_authentik()'s Authentik
+      # application to exist first, since the issuer/redirect URLs are
+      # fully predictable from installation constants and the client
+      # secret/tokens are already generated by ensure_ai_stand_secrets()
+      # before the first deploy.
+      #
+      # None of the six below may be a genuinely empty string. An empty
+      # substitution turns e.g. `issuer: $VAR` into `issuer: ` with nothing
+      # after the colon, which YAML parses as null, not "" - and every one
+      # of these fields is a required String, so agentgateway rejects null
+      # at config-load with its own type error (confirmed live 2026-09-11
+      # for issuer specifically: "invalid type: null, expected a string" -
+      # by inference the same holds for redirectURI/clientSecret, typed the
+      # same way). The API key tokens fail differently but just as fast
+      # ("data did not match any variant of untagged enum LocalAPIKey").
+      # Each of these crashes was fast enough to repeatedly win the race
+      # against apply_installation_service_env()'s follow-up fix-up push
+      # (both docker stack deploy's own service update and that fix-up are
+      # separate, --detach=true/async Swarm updates to the same service),
+      # reverting the whole env back to placeholders and requiring a manual
+      # re-push to recover - confirmed live 2026-09-11, repeatedly, working
+      # through this list one field at a time as each one's crash surfaced
+      # in turn. A syntactically-valid-but-inert placeholder for every
+      # field removes the race entirely: the very first boot succeeds (RBAC
+      # would reject anyone able to actually reach the ui: console with
+      # these dummy values, and the llm: keys are nonsense the apiKey check
+      # simply won't match - no legitimate traffic exists yet either way),
+      # and the real values then arrive as an ordinary, non-crashing
+      # rolling update.
+      AGENTGATEWAY_OIDC_ISSUER_URL: "https://unconfigured.invalid/"
+      AGENTGATEWAY_OIDC_REDIRECT_URI: "https://unconfigured.invalid/oauth/callback"
+      AUTHENTIK_AGENTGATEWAY_CLIENT_SECRET: "unconfigured"
+      AGENTGATEWAY_OPENWEBUI_TOKEN: "unconfigured"
+      AGENTGATEWAY_OPENCLAW_TOKEN: "unconfigured"
+      # Same reasoning as the block above, but a stricter constraint than
+      # "just not empty": agentgateway parses this one as an AES-256-GCM
+      # key and rejects anything that isn't exactly 64 hex characters
+      # (confirmed live: "expected 32 bytes... got 0 bytes" for an empty
+      # value, "Invalid character" for an arbitrary string).
+      OIDC_COOKIE_SECRET: "0000000000000000000000000000000000000000000000000000000000000000"
+    volumes:
+      - type: bind
+        source: /mnt/storage/agentgateway-data/server/config.yaml
+        target: /config/config.yaml
+        read_only: true
+    ports:
+      - target: 4000
+        published: 4000
+        protocol: tcp
+        mode: host
+      # 15000 (agentgateway's own built-in admin/health/metrics interface,
+      # distinct from the ui: console above, which lives on 4000) is
+      # intentionally not published - loopback-only inside the container by
+      # agentgateway's own default.
+    networks:
+      ai-network:
+        aliases:
+          - agentgateway
+    # No healthcheck block: the image is cr.agentgateway.dev/agentgateway,
+    # built FROM cgr.dev/chainguard/glibc-dynamic - a distroless image with
+    # no shell and no curl (confirmed against its Dockerfile), so a
+    # CMD-form healthcheck cannot run at all. cmd_verify()'s own external
+    # curl checks are the only liveness signal for this service.
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.agentgateway == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      # Not *ai-update/*ai-rollback: those default max_failure_ratio to 0,
+      # so Swarm rolls back on the FIRST failed task of any update,
+      # regardless of the long monitor window (that window bounds how long
+      # a task that already started successfully is watched for stability
+      # - it does not tolerate startup failures at all). Uniquely among
+      # this stack's services, agentgateway is expected to fail its first
+      # one or more tasks on a fresh update: it validates its OIDC issuer
+      # synchronously at startup and exits(1) if that fetch fails (confirmed
+      # live 2026-09-11 - this is unconditional, not something a
+      # syntactically-valid placeholder issuer value can route around,
+      # unlike every other config-load-time check this file's placeholders
+      # already cover), and both of its legitimate startup races - the
+      # plain env-var push in apply_installation_service_env() landing
+      # after docker stack deploy's own update, and the Authentik
+      # application not existing yet until cmd_configure_authentik() runs -
+      # are expected to resolve within seconds to (at the outside) one
+      # apply.sh command, not within a single Swarm update attempt.
+      # max_failure_ratio: 1 (100% failures tolerated) turns off
+      # rollback-on-failure entirely for this service and leaves
+      # restart_policy's own delay: 10s retries to do their job instead.
+      update_config:
+        <<: *ai-update
+        max_failure_ratio: 1
+      rollback_config: *ai-rollback
+
+networks:
+  ai-network:
+    driver: overlay
+    attachable: true
+    driver_opts:
+      encrypted: "true"
+  portainer-agent-network:
+    driver: overlay
+    attachable: true
+    driver_opts:
+      encrypted: "true"
+  # attachable:true (unlike the fully closed design this started as) is
+  # required here: the sandbox dind daemon cannot run as a Swarm service at
+  # all (Swarm's task API has never supported `privileged`, see
+  # ensure_openclaw_sandbox_dind_service in apply.sh), so it runs as a plain
+  # host-level `docker run` container on linux01 that explicitly attaches to
+  # this network from outside the stack. Isolation still holds: only
+  # openclaw-gateway is ever listed on this network in this file, and
+  # attaching anything else to it requires host-root Docker access on
+  # linux01 - the same trust level as being able to modify this whole stack.
+  openclaw-sandbox-network:
+    driver: overlay
+    attachable: true
+    driver_opts:
+      encrypted: "true"
+
+secrets:
+  ai-stand-authentik-postgres-password:
+    external: true
+  ai-stand-authentik-secret-key:
+    external: true
+  ai-stand-authentik-bootstrap-token:
+    external: true
+  ai-stand-authentik-bootstrap-password:
+    external: true
+  ai-stand-metamcp-postgres-password:
+    external: true
+  ai-stand-openwebui-secret-key:
+    external: true
+  ai-stand-openclaw-gateway-token:
+    external: true
+  ai-stand-agentgateway-openclaw-token:
+    external: true

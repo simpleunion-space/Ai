@@ -1,0 +1,15 @@
+services:
+  lmstudio:
+    image: ghcr.io/kukurusik/ai-stand-lmstudio:2026.09.12-1-nvidia
+    environment:
+      LMSTUDIO_ACCELERATOR: nvidia
+      LMSTUDIO_GPU: max
+      LMSTUDIO_RUNTIME_ID: llama.cpp-linux-x86_64-nvidia-cuda-avx2
+      LMSTUDIO_RUNTIME_MANIFEST: /opt/lmstudio-runtime-manifests/nvidia
+      LMSTUDIO_RUNTIME_PROFILE: nvidia
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      NVIDIA_VISIBLE_DEVICES: all
+    deploy:
+      placement:
+        constraints:
+          - node.labels.ai-stand.accelerator == nvidia
