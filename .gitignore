@@ -1,0 +1,115 @@
+### OS directories
+.Spotlight-V100
+.Trashes
+
+### OS files
+.DS_Store
+.DS_Store?
+Thumbs.db
+Desktop.ini
+
+### AI directories
+.agents
+.codex
+.claude
+.opencode
+
+### AI files
+
+
+### Build system directories
+.gradle
+
+### Build system files
+
+
+### IDE directories
+.vs
+.vscode
+.idea
+.devcontainer
+
+### IDE files
+
+
+### VCS directories
+
+
+### VCS files
+
+
+### DEV directories
+.docusaurus
+__pycache__
+node_modules
+.pnpm-store
+
+### DEV files
+*.suo
+*.user
+*.userprefs
+*.py[cod]
+
+### TESTS directories
+TestResults
+
+### TESTS files
+
+
+### Ansible directories
+.ansible
+
+### Ansible files
+*.retry
+
+### Unity directories
+[Ll]ibrary
+[Uu]ser[Ss]ettings
+
+### Unity files
+*.unityproj
+*.unitypackage
+*.pidb.meta
+*.pdb.meta
+*.mdb.meta
+*.apk
+*.aab
+*.app
+crashlytics-build.properties
+
+### Temp directories
+.utmp
+[Tt]mp
+[Tt]emp
+[Bb]in
+[Oo]bj
+[Ll]ogs
+[Bb]uild
+[Bb]uilds
+generated
+artifacts
+
+### Temp files
+*.bak
+*.tmp
+*.log
+
+### Secrets directories
+.vault-pass
+
+### Secrets files
+vault-password-file
+*.key
+*.pem
+*.p12
+*.pfx
+*.ovpn
+.env
+.env.*
+!.env.example
+
+### Full path
+.download
+.logs
+ansible-setup/inventories/*
+!ansible-setup/inventories/.gitkeep
