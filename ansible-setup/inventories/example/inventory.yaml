@@ -1,0 +1,48 @@
+---
+
+all:
+  vars:
+    accounts_list:
+      - name: setup
+        uid: 9999
+        gid: 9999
+        shell: /bin/bash
+        sudo: passwordless
+        password_lock: false
+        ssh_authorized_keys:
+          - CHANGE_ME
+      - name: service
+        uid: 10000
+        gid: 10000
+        shell: /bin/bash
+        sudo: none
+        password_lock: true
+      - name: storage
+        uid: 20000
+        gid: 20000
+        shell: /bin/bash
+        sudo: none
+        password_lock: true
+      - name: user
+        password_plaintext: CHANGE_ME
+        uid: 30000
+        gid: 30000
+        shell: /bin/bash
+        sudo: group
+        password_lock: false
+        ssh_authorized_keys:
+          - CHANGE_ME
+  hosts:
+    test01:
+      target_hostname: CHANGE_ME
+      ansible_user: CHANGE_ME
+      ansible_password: CHANGE_ME
+      ansible_ssh_private_key_file: CHANGE_ME
+    test02:
+      target_hostname: CHANGE_ME
+      ansible_user: CHANGE_ME
+      ansible_password: CHANGE_ME
+    test03:
+      target_hostname: CHANGE_ME
+      ansible_user: CHANGE_ME
+      ansible_password: CHANGE_ME
