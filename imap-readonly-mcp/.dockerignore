@@ -1,0 +1,7 @@
+.git
+.gitignore
+**/bin
+**/obj
+tests
+README.md
+SPEC.md
