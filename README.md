@@ -12,3 +12,4 @@
 | [`jira-readonly-mcp`](jira-readonly-mcp/README.md) | Read-only MCP к Jira Data Center через native REST API. |
 | [`confluence-readonly-mcp`](confluence-readonly-mcp/README.md) | Read-only MCP к Confluence Data Center через native REST API. |
 | [`imap-readonly-mcp`](imap-readonly-mcp/README.md) | Read-only MCP к одной IMAP-учётной записи. |
+| [`gigacode-subscription-bridge`](gigacode-subscription-bridge/README.md) | Внутренний .NET adapter персонального подписочного протокола GigaCode в OpenAI-compatible API. |

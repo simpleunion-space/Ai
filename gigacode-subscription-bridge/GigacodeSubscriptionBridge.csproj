@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+    <!-- The web SDK otherwise treats files under tests/bin and tests/obj as
+         publishable content after a local test run, recursively copying its
+         own outputs into the bridge build. The test project is separate. -->
+    <Content Remove="tests/**" />
+    <None Remove="tests/**" />
+  </ItemGroup>
+</Project>
