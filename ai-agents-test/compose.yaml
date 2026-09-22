@@ -1,0 +1,24 @@
+services:
+  benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-agents-test:latest
+    working_dir: /work
+    privileged: false
+    environment:
+      BENCHMARK_CONFIG_PATH: /input/benchmark.json
+      BENCHMARK_TASK_PATH: /input/task.md
+      BENCHMARK_RESULTS_ROOT: /output
+    volumes:
+      - type: bind
+        source: ./benchmark.json
+        target: /input/benchmark.json
+        read_only: true
+      - type: bind
+        source: ./task.md
+        target: /input/task.md
+        read_only: true
+      - type: bind
+        source: ./results
+        target: /output

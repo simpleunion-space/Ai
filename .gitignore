@@ -113,3 +113,6 @@ vault-password-file
 .logs
 ansible-setup/inventories/*
 !ansible-setup/inventories/.gitkeep
+ai-agents-test/set-api-keys.ps1
+ai-agents-test/.vagrant/
+ai-agents-test/results/*

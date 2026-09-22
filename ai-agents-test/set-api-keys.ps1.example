@@ -1,0 +1,20 @@
+<#
+.SYNOPSIS
+Локальные credentials для ai-agents-test.
+
+.DESCRIPTION
+This template and the ignored set-api-keys.ps1 intentionally contain no
+credentials. Скопируйте файл как set-api-keys.ps1, снимите # у нужных строк,
+укажите значения и запустите .\run.ps1:
+
+    . .\set-api-keys.ps1
+
+Значения передаются только контейнеру benchmark. Они не записываются в
+benchmark.json, сгенерированные CLI-конфигурации, логи или результаты.
+#>
+
+# $env:OPENROUTER_API_KEY = 'PASTE_OPENROUTER_KEY_HERE'
+# $env:OPENAI_COMPATIBLE_BASE_URL = 'https://provider.example/v1'
+# $env:OPENAI_COMPATIBLE_API_KEY = 'PASTE_OPENAI_COMPATIBLE_KEY_HERE'
+# $env:ANTHROPIC_COMPATIBLE_BASE_URL = 'https://provider.example/v1'
+# $env:ANTHROPIC_COMPATIBLE_API_KEY = 'PASTE_ANTHROPIC_COMPATIBLE_KEY_HERE'
