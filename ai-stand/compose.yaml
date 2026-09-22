@@ -61,6 +61,16 @@ x-openclaw-environment: &openclaw-environment
   # Goes through agentgateway, not LM Studio directly, using OpenClaw's
   # dedicated service bearer token (see agentgateway/config.yaml).
   OPENCLAW_LMSTUDIO_BASE_URL: http://agentgateway:4000/v1
+  # GigaCode is intentionally absent from the generic OpenAI provider: it is
+  # a personal subscription, reached only through a version-pinned adapter
+  # that proves the requester identity to the internal broker.
+  OPENCLAW_GIGACODE_SUBSCRIPTION_ENABLED: "0"
+  # Optional user-scoped read-only MCP integrations. They stay disabled until
+  # an installation supplies a complete external-account inventory; init.mjs
+  # then adds only these four managed entries and preserves user MCP entries.
+  OPENCLAW_READONLY_MCP_ENABLED: "0"
+  OPENCLAW_READONLY_MCP_BASE_URL: https://agentgateway.local
+  OPENCLAW_READONLY_MCP_PATH_PREFIX: /mcp/work
   # Installation profiles opt in with OPENCLAW_LANCEDB_ENABLED=1 and provide
   # the profiled model id/dimensions. Keeping this generic default disabled
   # avoids changing an existing persistent memory index during generic deploy
@@ -79,8 +89,12 @@ x-openclaw-environment: &openclaw-environment
   # streaming. init.mjs writes this to models.providers.lmstudio.timeoutSeconds.
   OPENCLAW_PROVIDER_TIMEOUT_SECONDS: "86400"
   OPENCLAW_PUBLIC_ORIGIN: https://openclaw.local
+  # Opt-in only after the installation has configured a trusted Authentik
+  # forward-auth proxy.  Token authentication remains the generic default;
+  # init.mjs refuses to enable trusted-proxy mode without this explicit flag.
+  OPENCLAW_AUTHENTIK_TRUSTED_PROXY_ENABLED: "0"
   OPENCLAW_STATE_DIR: /home/ai/.openclaw
-  OPENCLAW_TRUSTED_PROXIES: 172.18.0.1
+  OPENCLAW_TRUSTED_PROXIES: 127.0.0.1,::1
   OPENCLAW_WORKSPACE_DIR: /home/ai/.openclaw/workspace
   TERM: xterm-256color
 
@@ -136,8 +150,10 @@ x-openwebui-environment: &openwebui-environment
   RAG_EMBEDDING_ENGINE: openai
   RAG_EMBEDDING_MODEL: qwen3-embedding-0.6b-q8
   RAG_EMBEDDING_MODEL_AUTO_UPDATE: "False"
-  RAG_OPENAI_API_BASE_URL: http://lmstudio:1234/v1
-  RAG_OPENAI_API_KEY: lmstudio
+  # Retrieval must use the same authenticated model boundary as chat. Direct
+  # LM Studio access would bypass Agentgateway policy and observability.
+  RAG_OPENAI_API_BASE_URL: http://agentgateway:4000/v1
+  RAG_OPENAI_API_KEY: pending-profile-apply
   SCARF_NO_ANALYTICS: "True"
   TZ: Europe/Moscow
   WEBUI_AUTH: "True"
@@ -159,7 +175,7 @@ x-authentik-environment: &authentik-environment
   AUTHENTIK_BOOTSTRAP_USERNAME: akadmin
   AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
   AUTHENTIK_HOST_BROWSER: https://authentik.local
-  # authentik 2026.5+ defaults this to the IPv6 wildcard [::]; ai-network is IPv4-only
+  # authentik 2026.5+ defaults this to the IPv6 wildcard [::]; ai-core is IPv4-only
   # (EnableIPv6=false), so leaving the default would risk the port never binding at all.
   AUTHENTIK_LISTEN__HTTP: "0.0.0.0:9000"
   # authentik 2026.8+ only trusts X-Forwarded-Proto/Host/For when the connecting
@@ -242,7 +258,7 @@ services:
         source: /mnt/storage/authentik-data/postgresql
         target: /var/lib/postgresql
     networks:
-      ai-network:
+      ai-core:
         aliases:
           - authentik-postgresql
           - authentik-db
@@ -290,7 +306,7 @@ services:
         source: /mnt/storage/authentik-data/redis
         target: /data
     networks:
-      ai-network:
+      ai-core:
         aliases:
           - authentik-redis
     healthcheck:
@@ -339,7 +355,7 @@ services:
       - SETGID
       - SETUID
       - FOWNER
-    image: ghcr.io/kukurusik/ai-stand-authentik:2026.09.15-1
+    image: ghcr.io/kukurusik/ai-stand-authentik:2026.09.23-1
     command:
       - ak
       - server
@@ -370,7 +386,7 @@ services:
         protocol: tcp
         mode: host
     networks:
-      ai-network:
+      ai-core:
         aliases:
           - authentik
           - authentik-server
@@ -416,7 +432,7 @@ services:
       - SETGID
       - SETUID
       - FOWNER
-    image: ghcr.io/kukurusik/ai-stand-authentik:2026.09.15-1
+    image: ghcr.io/kukurusik/ai-stand-authentik:2026.09.23-1
     command:
       - ak
       - worker
@@ -442,7 +458,7 @@ services:
         source: /mnt/storage/authentik-data/server/templates
         target: /templates
     networks:
-      ai-network:
+      ai-core:
         aliases:
           - authentik-worker
     stop_grace_period: 30s
@@ -493,13 +509,8 @@ services:
       - type: bind
         source: /mnt/storage/lmstudio-data/lmstudio
         target: /home/ai
-    ports:
-      - target: 1234
-        published: 1234
-        protocol: tcp
-        mode: host
     networks:
-      ai-network:
+      ai-models-backend:
         aliases:
           - lmstudio
     stop_grace_period: 1m
@@ -525,7 +536,7 @@ services:
 
   lmstudio-proxy:
     <<: *ai-security
-    image: ghcr.io/kukurusik/ai-stand-lmstudio-proxy:2026.09.15-1
+    image: ghcr.io/kukurusik/ai-stand-lmstudio-proxy:2026.09.23-1
     environment:
       <<: *common-environment
       AI_WRITABLE_PATHS: /home/ai
@@ -550,13 +561,8 @@ services:
       # Kept equal to the total request budget: a local model may spend a
       # long time producing its first token or between stream chunks.
       LMSTUDIO_PROXY_UPSTREAM_IDLE_TIMEOUT_MS: "86400000"
-    ports:
-      - target: 11234
-        published: 11234
-        protocol: tcp
-        mode: host
     networks:
-      ai-network:
+      ai-models-backend:
         aliases:
           - lmstudio-proxy
     stop_grace_period: 30s
@@ -597,7 +603,7 @@ services:
       - SETGID
       - SETUID
       - FOWNER
-    image: ghcr.io/kukurusik/ai-stand-openclaw:2026.09.15-1
+    image: ghcr.io/kukurusik/ai-stand-openclaw:2026.09.23-1
     environment: *openclaw-environment
     secrets:
       - source: ai-stand-openclaw-gateway-token
@@ -616,11 +622,11 @@ services:
         protocol: tcp
         mode: host
     networks:
-      ai-network:
+      ai-core:
         aliases:
           - openclaw
           - openclaw-gateway
-      openclaw-sandbox-network: {}
+      ai-openclaw-sandbox: {}
     stop_grace_period: 30s
     healthcheck:
       test:
@@ -653,13 +659,13 @@ services:
 
   # openclaw-sandbox-dind is NOT a Swarm service - Swarm's task API cannot
   # grant `privileged`, which a dind daemon has no working substitute for.
-  # It runs as a plain host-level `docker run` container on linux01, managed
+  # It runs as a plain host-level `docker run` container on ai02, managed
   # by a dedicated systemd unit (ensure_openclaw_sandbox_dind_service in
-  # apply.sh), attached to openclaw-sandbox-network above with the same
+  # apply.sh), attached to ai-openclaw-sandbox above with the same
   # `openclaw-sandbox-dind` alias openclaw-gateway's DOCKER_HOST expects.
 
   openwebui:
-    image: ghcr.io/open-webui/open-webui:v0.11.3
+    image: ghcr.io/open-webui/open-webui:v0.11.4
     environment: *openwebui-environment
     secrets:
       - source: ai-stand-openwebui-secret-key
@@ -675,7 +681,7 @@ services:
         protocol: tcp
         mode: host
     networks:
-      ai-network:
+      ai-core:
         aliases:
           - openwebui
     stop_grace_period: 30s
@@ -713,7 +719,7 @@ services:
         order: stop-first
 
   portainer-agent:
-    image: portainer/agent:2.45.0
+    image: portainer/agent:2.45.1
     environment:
       AGENT_CLUSTER_ADDR: tasks.portainer-agent
     volumes:
@@ -724,7 +730,7 @@ services:
         source: /var/lib/docker/volumes
         target: /var/lib/docker/volumes
     networks:
-      portainer-agent-network:
+      ai-portainer-agent:
         aliases:
           - portainer-agent
     deploy:
@@ -741,7 +747,7 @@ services:
         order: stop-first
 
   portainer:
-    image: portainer/portainer-ce:2.45.0
+    image: portainer/portainer-ce:2.45.1
     user: "10000:20000"
     command:
       # No `-H tcp://tasks.portainer-agent:9001` / --tlsskipverify here:
@@ -775,7 +781,7 @@ services:
         protocol: tcp
         mode: host
     networks:
-      portainer-agent-network:
+      ai-portainer-agent:
         aliases:
           - portainer
     cap_drop:
@@ -826,7 +832,7 @@ services:
         source: /mnt/storage/metamcp-data/postgres
         target: /var/lib/postgresql
     networks:
-      ai-network:
+      ai-core:
         aliases:
           - metamcp-postgres
     healthcheck:
@@ -881,7 +887,7 @@ services:
       # but the provisioned admin should ever be able to create an account.
       # In v2.4.22 this flag does not itself block /register or the sign-up API.
       # The installation's public nginx route returns 404 for those paths while
-      # bootstrap provisioning uses the internal ai-network endpoint. Keep this
+      # bootstrap provisioning uses the internal ai-core endpoint. Keep this
       # enabled too, so an upstream implementation becomes defence in depth.
       BOOTSTRAP_DISABLE_REGISTRATION_UI: "true"
       BOOTSTRAP_USER_NAME: admin
@@ -908,7 +914,7 @@ services:
         protocol: tcp
         mode: host
     networks:
-      ai-network:
+      ai-core:
         aliases:
           - metamcp
     stop_grace_period: 30s
@@ -936,9 +942,69 @@ services:
       update_config: *ai-update
       rollback_config: *ai-rollback
 
-  # Unified OIDC auth + model gateway, fronting lmstudio-proxy only - see
-  # agentgateway/config.yaml for the actual routing/auth/RBAC config. No MCP
-  # here at all, that stays MetaMCP's job (see the metamcp service above).
+  # Unified OIDC/model gateway. Its generic config fronts lmstudio-proxy;
+  # an explicitly enabled installation additionally renders identity-scoped
+  # read-only MCP routes here. MetaMCP remains the separate self-service hub.
+  agentgateway-postgres:
+    # Backs agentgateway's own request-log/analytics database
+    # (config.logging.database in agentgateway/config.yaml, "request log
+    # database is not configured" otherwise). Same image/version as this
+    # stack's other Postgres instances (authentik-postgresql/metamcp-postgres)
+    # for consistency.
+    image: docker.io/library/postgres:18-alpine
+    user: "10000:20000"
+    environment:
+      POSTGRES_DB: agentgateway
+      POSTGRES_PASSWORD_FILE: /run/secrets/ai-stand-agentgateway-postgres-password
+      POSTGRES_USER: agentgateway
+      TZ: Europe/Moscow
+    secrets:
+      - source: ai-stand-agentgateway-postgres-password
+        target: ai-stand-agentgateway-postgres-password
+        mode: 0444
+    volumes:
+      # postgres 18 manages its own major-version-specific subdirectory
+      # under a single /var/lib/postgresql mount - see the identical note
+      # on authentik-postgresql/metamcp-postgres above.
+      - type: bind
+        source: /mnt/storage/agentgateway-data/postgres
+        target: /var/lib/postgresql
+    networks:
+      ai-core:
+        aliases:
+          - agentgateway-postgres
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U agentgateway -d agentgateway
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        # Same label as agentgateway itself (below) - required so this
+        # service's node-local bind-mount always co-locates with the one
+        # app that talks to it.
+        constraints:
+          - node.labels.ai-stand.agentgateway == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 2m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 2m
+        order: stop-first
+
   agentgateway:
     image: cr.agentgateway.dev/agentgateway:v1.5.0
     # Without an explicit -f, agentgateway's default /config auto-discovery
@@ -1002,12 +1068,18 @@ services:
       AUTHENTIK_AGENTGATEWAY_CLIENT_SECRET: "unconfigured"
       AGENTGATEWAY_OPENWEBUI_TOKEN: "unconfigured"
       AGENTGATEWAY_OPENCLAW_TOKEN: "unconfigured"
+      MCP_AUTHENTIK_ISSUER_URL: "https://unconfigured.invalid/"
+      MCP_AUTHENTIK_CLIENT_ID: "unconfigured"
       # Same reasoning as the block above, but a stricter constraint than
       # "just not empty": agentgateway parses this one as an AES-256-GCM
       # key and rejects anything that isn't exactly 64 hex characters
       # (confirmed live: "expected 32 bytes... got 0 bytes" for an empty
       # value, "Invalid character" for an arbitrary string).
       OIDC_COOKIE_SECRET: "0000000000000000000000000000000000000000000000000000000000000000"
+      # Embedded mid-string inside config.logging.database.url's postgres://
+      # connection URL - same placeholder-then-real-value handoff as every
+      # field above, just not a whole-field substitution like the others.
+      AGENTGATEWAY_POSTGRES_PASSWORD: "unconfigured"
     volumes:
       - type: bind
         source: /mnt/storage/agentgateway-data/server/config.yaml
@@ -1023,7 +1095,9 @@ services:
       # intentionally not published - loopback-only inside the container by
       # agentgateway's own default.
     networks:
-      ai-network:
+      ai-core:
+      ai-models-backend:
+      ai-mcp-backend:
         aliases:
           - agentgateway
     # No healthcheck block: the image is cr.agentgateway.dev/agentgateway,
@@ -1066,12 +1140,22 @@ services:
       rollback_config: *ai-rollback
 
 networks:
-  ai-network:
+  ai-core:
     driver: overlay
     attachable: true
     driver_opts:
       encrypted: "true"
-  portainer-agent-network:
+  ai-models-backend:
+    driver: overlay
+    attachable: false
+    driver_opts:
+      encrypted: "true"
+  ai-mcp-backend:
+    driver: overlay
+    attachable: false
+    driver_opts:
+      encrypted: "true"
+  ai-portainer-agent:
     driver: overlay
     attachable: true
     driver_opts:
@@ -1080,12 +1164,12 @@ networks:
   # required here: the sandbox dind daemon cannot run as a Swarm service at
   # all (Swarm's task API has never supported `privileged`, see
   # ensure_openclaw_sandbox_dind_service in apply.sh), so it runs as a plain
-  # host-level `docker run` container on linux01 that explicitly attaches to
+  # host-level `docker run` container on ai02 that explicitly attaches to
   # this network from outside the stack. Isolation still holds: only
   # openclaw-gateway is ever listed on this network in this file, and
   # attaching anything else to it requires host-root Docker access on
-  # linux01 - the same trust level as being able to modify this whole stack.
-  openclaw-sandbox-network:
+  # ai02 - the same trust level as being able to modify this whole stack.
+  ai-openclaw-sandbox:
     driver: overlay
     attachable: true
     driver_opts:
@@ -1107,4 +1191,6 @@ secrets:
   ai-stand-openclaw-gateway-token:
     external: true
   ai-stand-agentgateway-openclaw-token:
+    external: true
+  ai-stand-agentgateway-postgres-password:
     external: true

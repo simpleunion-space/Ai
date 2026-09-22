@@ -1,0 +1,210 @@
+# Optional Coder control plane.  It is deliberately a separate overlay so a
+# generic ai-stand deployment neither downloads Coder nor creates its database
+# until an installation explicitly sets CODER_ENABLED=1.
+#
+# `ai-coder-control` is a Swarm overlay for Coder and its PostgreSQL database.
+# Workspace containers are *not* attached to this network: Terraform runs in
+# Coder's built-in provisioner against the dedicated rootless Docker daemon
+# mounted at /run/coder-rootless/docker.sock.  That daemon owns its own local
+# `ai-coder-workspaces` bridge and has no host Docker socket.
+
+services:
+  coder-postgresql:
+    image: docker.io/library/postgres:18-alpine
+    user: "10000:20000"
+    environment:
+      POSTGRES_DB: coder
+      POSTGRES_PASSWORD_FILE: /run/secrets/ai-stand-coder-postgres-password
+      POSTGRES_USER: coder
+      TZ: Europe/Moscow
+    secrets:
+      - source: ai-stand-coder-postgres-password
+        target: ai-stand-coder-postgres-password
+        mode: 0444
+    volumes:
+      # PostgreSQL 18 owns a version-specific data directory beneath this
+      # mount.  Keep the mount at /var/lib/postgresql, not its old /data path.
+      - type: bind
+        source: /mnt/storage/coder-data/postgres
+        target: /var/lib/postgresql
+    networks:
+      ai-coder-control:
+        aliases:
+          - coder-postgresql
+          - coder-db
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U coder -d coder
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 5m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.coder == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 2m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 2m
+        order: stop-first
+
+  coder:
+    image: ai-stand-coder:2.36.6-1
+    user: "10000:20000"
+    command:
+      - server
+    environment:
+      HOME: /home/coder
+      TZ: Europe/Moscow
+      # The native default binds 127.0.0.1:3000 inside the container.  Coder
+      # is reached only through the host-published loopback-protected port
+      # and Nginx, so listen on the service interface while keeping TLS at
+      # Nginx.
+      CODER_HTTP_ADDRESS: 0.0.0.0:7080
+      CODER_ACCESS_URL: "https://${CODER_HOST:-coder.local}"
+      CODER_PG_PASSWORD_FILE: /run/secrets/ai-stand-coder-postgres-password
+      CODER_DISABLE_PASSWORD_AUTH: "true"
+      # Authentik is the only login authority for this installation. Coder
+      # otherwise enables its managed GitHub *login* provider by default.
+      CODER_OAUTH2_GITHUB_DEFAULT_PROVIDER_ENABLE: "false"
+      CODER_OIDC_ISSUER_URL: "https://${AUTHENTIK_HOST:-authentik.local}/application/o/coder/"
+      CODER_OIDC_CLIENT_ID: coder
+      CODER_OIDC_CLIENT_SECRET_FILE: /run/secrets/ai-stand-authentik-coder-client-secret
+      # Keep the native Coder OIDC button explicit.  Without this, Coder's
+      # generic label is easy to mistake for a disabled local-login form.
+      CODER_OIDC_SIGN_IN_TEXT: "Войти через Authentik"
+      # Served by the local Authentik instance itself, not an external icon
+      # CDN. This is Authentik's official built-in brand mark.
+      CODER_OIDC_ICON_URL: "https://${AUTHENTIK_HOST:-authentik.local}/static/dist/assets/icons/icon_left_brand.svg"
+      CODER_OIDC_ALLOW_SIGNUPS: "true"
+      CODER_OIDC_SCOPES: openid,profile,email,groups,offline_access
+      CODER_OIDC_GROUP_FIELD: groups
+      CODER_OIDC_ALLOWED_GROUPS: ai-users,ai-admins
+      # Authentik emits the ai-stand-managed group names in the `groups`
+      # claim. Coder's native role sync retains `member` for users and grants
+      # site-owner capabilities only to ai-admins.
+      CODER_OIDC_USER_ROLE_FIELD: groups
+      CODER_OIDC_USER_ROLE_MAPPING: '{"ai-users":["member"],"ai-admins":["owner"]}'
+      # The Coder server owns built-in provisioners. They receive only the
+      # dedicated rootless Docker endpoint below, never /var/run/docker.sock.
+      DOCKER_HOST: unix:///run/coder-rootless/docker.sock
+    secrets:
+      - source: ai-stand-coder-postgres-password
+        target: ai-stand-coder-postgres-password
+        mode: 0444
+      - source: ai-stand-authentik-coder-client-secret
+        target: ai-stand-authentik-coder-client-secret
+        mode: 0444
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    volumes:
+      - type: bind
+        source: /mnt/storage/coder-data/server
+        target: /home/coder
+      - type: bind
+        source: /mnt/storage/coder-data/provisioner/docker.sock
+        target: /run/coder-rootless/docker.sock
+      # The short top-level `tmpfs:` key (used here until 2026-09-23) is
+      # silently dropped by `docker stack deploy` - Swarm mode's Compose
+      # support never materializes it into the service's actual mounts,
+      # confirmed live by inspecting the running service's own
+      # Spec.TaskTemplate.ContainerSpec.Mounts (only the two binds above
+      # ever showed up). Coder's Terraform provisioner needs a writable
+      # /tmp for its own provider-plugin RPC handshake (a Unix socket
+      # under $TMPDIR/os.TempDir()) - without it, every `terraform
+      # validate`/plan/apply fails with "Failed to read any lines from
+      # plugin's stdout", which reads like a binary-compatibility error
+      # but isn't one. Long-syntax volumes with type: tmpfs is the
+      # Swarm-supported equivalent.
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 1073741824
+          mode: 0o1777
+    ports:
+      # Host-published only for native Nginx on ai02. The ai-stand firewall
+      # blocks it off-loopback; no direct user-facing Coder port exists.
+      - target: 7080
+        published: 17080
+        protocol: tcp
+        mode: host
+    networks:
+      ai-coder-control:
+        aliases:
+          - coder
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl --fail --silent --show-error http://127.0.0.1:7080/healthz >/dev/null
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.coder == true
+      restart_policy:
+        condition: any
+        delay: 10s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        # Not rollback, unlike every other update_config in this repo.
+        # coder:2.36.6-1 is a purely local build with no registry prefix
+        # (docker.io/library/ai-stand-coder implicitly) and no digest -
+        # confirmed live 2026-09-23: any docker service update against this
+        # service (not just docker stack deploy, which passes
+        # --resolve-image never) can make Swarm re-verify that tag against
+        # a real registry for the replacement task, which Docker Hub
+        # rejects for an unpublished name under library/ ("pull access
+        # denied"). With the default failure_action (rollback) and
+        # MaxFailureRatio 0, that single transient rejection immediately
+        # reverted the whole update - confirmed by watching
+        # CODER_OIDC_IGNORE_EMAIL_VERIFIED vanish within seconds of being
+        # added, repeatedly, until this was found. The occasional pull
+        # attempt itself couldn't be suppressed (service update has no
+        # --resolve-image never equivalent), so tolerate it here instead:
+        # the existing restart_policy already retries a failed task on its
+        # own, and every retry so far has eventually landed on a placement
+        # that skips the pull and starts from the local image.
+        failure_action: continue
+        monitor: 10m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 10m
+        order: stop-first
+
+networks:
+  ai-coder-control:
+    driver: overlay
+    attachable: false
+    driver_opts:
+      encrypted: "true"
+
+secrets:
+  ai-stand-coder-postgres-password:
+    external: true
+  ai-stand-authentik-coder-client-secret:
+    external: true

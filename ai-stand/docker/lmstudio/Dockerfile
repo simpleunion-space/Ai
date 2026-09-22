@@ -40,10 +40,12 @@ WORKDIR /opt/lmstudio-seed
 # runtime binary itself is fetched by this script's own closed-source
 # updater with no independently verifiable checksum available to us - this
 # pin only covers the entry point, not everything it can later download.
-# Re-pinned 2026-09-10: upstream bumped its embedded APP_VERSION (0.0.22-1
-# -> 0.0.24-1). Diffed the new script against archive.org snapshots back to
-# 0.0.21-2 (2026-08-25) - that version string is the only line that ever
-# changes between releases; installer logic itself is unmodified.
+# Re-pinned 2026-09-23: upstream bumped its embedded APP_VERSION (0.0.24-1
+# -> 0.0.25-1). Diffed the new script against the archive.org snapshot for
+# 2026-08-25 (0.0.21-2 then) - identical apart from the APP_VERSION line,
+# confirming the pattern this comment has relied on since it was first
+# pinned still holds: that version string is the only line that ever
+# changes between releases, installer logic itself is unmodified.
 RUN curl \
         --fail \
         --location \
@@ -53,7 +55,7 @@ RUN curl \
         --tlsv1.2 \
         https://lmstudio.ai/install.sh \
         --output /tmp/lmstudio-install.sh \
-    && echo "076edb51310664314222a2d706b41882d09675245f4ea3eb884185e23d85e0a6  /tmp/lmstudio-install.sh" | sha256sum --check --strict \
+    && echo "bfa37ffc1d9ee88c58355e01bc5b19381ab36e7368a4ab2fdcc0338b04c3d71d  /tmp/lmstudio-install.sh" | sha256sum --check --strict \
     && HOME=/opt/lmstudio-seed sh /tmp/lmstudio-install.sh --quiet --no-modify-path \
     && rm -f /tmp/lmstudio-install.sh \
     && test -x /opt/lmstudio-seed/.lmstudio/bin/lms

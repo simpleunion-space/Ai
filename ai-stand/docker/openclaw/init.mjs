@@ -86,6 +86,21 @@ function setConfig(path, value, options = [], { sensitive = false } = {}) {
   runCli(["config", "set", path, value, ...options], sensitive ? [3] : []);
 }
 
+function unsetConfig(path) {
+  const result = spawnSync("openclaw", ["config", "unset", path], {
+    cwd: process.env.HOME,
+    env: process.env,
+    stdio: "inherit",
+  });
+  if (result.error) throw result.error;
+  // `config unset` is idempotent in the pinned OpenClaw CLI. A non-zero
+  // result indicates an actual invalid configuration/path and must stop the
+  // deployment rather than leave a retired static subscription provider live.
+  if (result.status !== 0) {
+    throw new Error(`OpenClaw config unset failed: ${path}`);
+  }
+}
+
 function isEnabled(name) {
   return ["1", "true", "yes", "on"].includes(process.env[name]?.trim().toLowerCase());
 }
@@ -115,10 +130,32 @@ const maxTokens = positiveInteger("OPENCLAW_MAX_TOKENS");
 const baseUrl = required("OPENCLAW_LMSTUDIO_BASE_URL");
 const providerTimeoutSeconds = positiveInteger("OPENCLAW_PROVIDER_TIMEOUT_SECONDS");
 const agentgatewayToken = required("AGENTGATEWAY_TOKEN");
-const gatewayToken = required("OPENCLAW_GATEWAY_TOKEN");
+const authentikTrustedProxyEnabled = isEnabled("OPENCLAW_AUTHENTIK_TRUSTED_PROXY_ENABLED");
+const gatewayToken = authentikTrustedProxyEnabled ? null : required("OPENCLAW_GATEWAY_TOKEN");
 const publicOrigin = new URL(required("OPENCLAW_PUBLIC_ORIGIN"));
 const trustedProxies = optionalList("OPENCLAW_TRUSTED_PROXIES");
 const modelRef = `lmstudio/${modelId}`;
+const gigacodeEnabled = isEnabled("OPENCLAW_GIGACODE_SUBSCRIPTION_ENABLED");
+const gigacodeModelId = gigacodeEnabled ? required("OPENCLAW_GIGACODE_MODEL_ID") : null;
+const gigacodeDisplayName = gigacodeEnabled ? required("OPENCLAW_GIGACODE_DISPLAY_NAME") : null;
+const gigacodeContextWindow = gigacodeEnabled ? positiveInteger("OPENCLAW_GIGACODE_CONTEXT_WINDOW") : null;
+const gigacodeAdapterBaseUrl = gigacodeEnabled
+  ? new URL(required("OPENCLAW_GIGACODE_ADAPTER_BASE_URL"))
+  : null;
+const gigacodeAdapterBearer = gigacodeEnabled ? required("OPENCLAW_GIGACODE_ADAPTER_BEARER") : null;
+const gigacodeTelegramSubjectMapPath = gigacodeEnabled
+  ? required("OPENCLAW_GIGACODE_TELEGRAM_SUBJECT_MAP_FILE")
+  : null;
+// The bridge's public model ID intentionally includes a slash. OpenClaw
+// identifies the provider with the first segment only and sends the complete
+// model ID to agentgateway, where the explicit gigacode/codechat route is
+// evaluated before the local LM Studio wildcard.
+const gigacodeModelRef = gigacodeEnabled ? `gigacode/${gigacodeModelId}` : null;
+const readonlyMcpEnabled = isEnabled("OPENCLAW_READONLY_MCP_ENABLED");
+const readonlyMcpBaseUrl = readonlyMcpEnabled ? new URL(required("OPENCLAW_READONLY_MCP_BASE_URL")) : null;
+const readonlyMcpPathPrefix = readonlyMcpEnabled
+  ? required("OPENCLAW_READONLY_MCP_PATH_PREFIX")
+  : "/mcp/work";
 const codexExecutionProfile = enumValue("OPENCLAW_CODEX_EXECUTION_PROFILE", ["guardian", "autonomous"]);
 const lancedbEnabled = isEnabled("OPENCLAW_LANCEDB_ENABLED");
 const lancedb = lancedbEnabled
@@ -162,6 +199,27 @@ if (publicOrigin.protocol !== "https:" || publicOrigin.pathname !== "/") {
   throw new Error("OPENCLAW_PUBLIC_ORIGIN must be an HTTPS origin without a path");
 }
 
+if (authentikTrustedProxyEnabled && trustedProxies.length === 0) {
+  throw new Error("OPENCLAW_TRUSTED_PROXIES is required when Authentik trusted-proxy mode is enabled");
+}
+
+if (readonlyMcpBaseUrl && readonlyMcpBaseUrl.protocol !== "https:") {
+  throw new Error("OPENCLAW_READONLY_MCP_BASE_URL must be an HTTPS origin");
+}
+
+if (gigacodeAdapterBaseUrl && (
+  gigacodeAdapterBaseUrl.protocol !== "http:" ||
+  gigacodeAdapterBaseUrl.pathname !== "/v1" ||
+  gigacodeAdapterBaseUrl.search ||
+  gigacodeAdapterBaseUrl.hash
+)) {
+  throw new Error("OPENCLAW_GIGACODE_ADAPTER_BASE_URL must be an internal HTTP /v1 origin");
+}
+
+if (!/^\/mcp\/[a-z][a-z0-9-]{0,62}$/.test(readonlyMcpPathPrefix)) {
+  throw new Error("OPENCLAW_READONLY_MCP_PATH_PREFIX must match /mcp/<lowercase-slug>");
+}
+
 const provider = {
   baseUrl,
   apiKey: agentgatewayToken,
@@ -187,6 +245,34 @@ const provider = {
     },
   ],
 };
+
+const gigacodeProvider = gigacodeEnabled
+  ? {
+      // This is a local ai02 adapter, not Agentgateway and not GigaCode.
+      // The adapter proves an authenticated requester before it obtains a
+      // short-lived broker JWT for a single personal Agentgateway route.
+      baseUrl: gigacodeAdapterBaseUrl.toString().replace(/\/$/, ""),
+      apiKey: gigacodeAdapterBearer,
+      api: "openai-responses",
+      timeoutSeconds: providerTimeoutSeconds,
+      models: [
+        {
+          id: gigacodeModelId,
+          name: gigacodeDisplayName,
+          reasoning: true,
+          input: ["text", "image"],
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+          },
+          contextWindow: gigacodeContextWindow,
+          maxTokens: Math.min(maxTokens, Math.floor(gigacodeContextWindow / 2)),
+        },
+      ],
+    }
+  : null;
 
 // OpenClaw's Codex harness otherwise chooses its own implicit mode from the
 // local runtime requirements. Be explicit: a profile must never silently
@@ -223,6 +309,33 @@ const execPolicy =
     ? { mode: "full", strictInlineEval: false }
     : { mode: "auto" };
 
+const gatewayAuth = authentikTrustedProxyEnabled
+  ? {
+      mode: "trusted-proxy",
+      allowTailscale: false,
+      trustedProxy: {
+        // Authentik documents this as a stable hashed identifier, unlike a
+        // mutable username or email. ai02 Nginx overwrites it from the
+        // forward-auth response and strips every client-supplied variant.
+        userHeader: "x-authentik-uid",
+        requiredHeaders: ["x-forwarded-host", "x-forwarded-proto", "x-authentik-meta-provider"],
+        allowUsers: [],
+        // The profile's native Nginx reaches the host-published Gateway on
+        // loopback. This opt-in is safe only with strict loopback proxy
+        // addresses and a host firewall that closes direct port 18789 access.
+        allowLoopback: true,
+        deviceAutoApprove: {
+          enabled: true,
+          scopes: ["operator.read", "operator.write", "operator.approvals", "operator.questions"],
+        },
+      },
+    }
+  : {
+      mode: "token",
+      token: gatewayToken,
+      allowTailscale: false,
+    };
+
 clearLmstudioAuthProfiles();
 
 setConfig("gateway.mode", JSON.stringify("local"), ["--strict-json"]);
@@ -231,12 +344,16 @@ setConfig("gateway.mode", JSON.stringify("local"), ["--strict-json"]);
 // gotcha already noted elsewhere in this repo for other "kept in sync by
 // hand" pairs (e.g. compose.yaml's AUTHENTIK_BOOTSTRAP_USERNAME).
 setConfig("gateway.bind", JSON.stringify("lan"), ["--strict-json"]);
-setConfig("gateway.auth.mode", JSON.stringify("token"), ["--strict-json"]);
-setConfig("gateway.auth.token", JSON.stringify(gatewayToken), ["--strict-json"], { sensitive: true });
-setConfig("gateway.auth.allowTailscale", JSON.stringify(false), ["--strict-json"]);
+// Replace the complete object: this removes a persisted token when switching
+// an existing Gateway state to the mutually exclusive trusted-proxy mode.
+setConfig("gateway.auth", JSON.stringify(gatewayAuth), ["--strict-json"], { sensitive: !authentikTrustedProxyEnabled });
 setConfig("gateway.trustedProxies", JSON.stringify(trustedProxies), ["--strict-json"]);
 setConfig("gateway.allowRealIpFallback", JSON.stringify(false), ["--strict-json"]);
 setConfig("gateway.controlUi.enabled", JSON.stringify(true), ["--strict-json"]);
+// File/binary links are constructed by the gateway itself. Persist the
+// externally reachable origin, otherwise a replaced sandbox can make links
+// fall back to its internal localhost address.
+setConfig("gateway.publicOrigin", JSON.stringify(publicOrigin.origin), ["--strict-json"]);
 setConfig(
   "gateway.controlUi.allowedOrigins",
   JSON.stringify([publicOrigin.origin]),
@@ -269,10 +386,42 @@ setConfig("models.mode", JSON.stringify("merge"), ["--strict-json"]);
 // (previously the harmless constant "lmstudio"), so keep it out of a
 // thrown-error message the way gatewayToken already is below.
 setConfig("models.providers.lmstudio", JSON.stringify(provider), ["--strict-json"], { sensitive: true });
+if (gigacodeProvider) {
+  // This provider ends at the local ai02 adapter. The adapter accepts only
+  // an opaque session record produced by the version-pinned requester
+  // plugin, then obtains a short-lived subject JWT for one Agentgateway
+  // route. No shared machine token can address a subscription backend.
+  setConfig("models.providers.gigacode", JSON.stringify(gigacodeProvider), ["--strict-json"], { sensitive: true });
+} else {
+  // GigaCode is now a personal subscription path.  Remove a provider written
+  // by earlier m01 profiles so a static machine token cannot keep invoking a
+  // former shared bridge after the personal adapter is enabled.
+  unsetConfig("models.providers.gigacode");
+}
+if (gigacodeEnabled) {
+  setConfig(
+    "plugins.entries.ai-stand-gigacode-requester",
+    JSON.stringify({
+      enabled: true,
+      hooks: { allowConversationAccess: true },
+      config: {
+        sessionMapPath: "/home/ai/.openclaw/gigacode-requester/sessions.json",
+        telegramSubjectMapPath: gigacodeTelegramSubjectMapPath,
+      },
+    }),
+    ["--strict-json"],
+  );
+} else {
+  unsetConfig("plugins.entries.ai-stand-gigacode-requester");
+}
 setConfig("agents.defaults.model.primary", JSON.stringify(modelRef), ["--strict-json"]);
+const selectableModels = { [modelRef]: { alias: "Local Qwen" } };
+if (gigacodeModelRef) {
+  selectableModels[gigacodeModelRef] = { alias: gigacodeDisplayName };
+}
 setConfig(
   "agents.defaults.models",
-  JSON.stringify({ [modelRef]: { alias: "Local Qwen" } }),
+  JSON.stringify(selectableModels),
   ["--strict-json", "--replace"],
 );
 // agents.defaults.modelPolicy.allow is OpenClaw's actual allowlist for
@@ -294,11 +443,35 @@ setConfig(
 // available.
 setConfig(
   "agents.defaults.modelPolicy.allow",
-  JSON.stringify([modelRef]),
+  JSON.stringify(gigacodeModelRef ? [modelRef, gigacodeModelRef] : [modelRef]),
   ["--strict-json"],
 );
 
 setConfig("tools.exec", JSON.stringify(execPolicy), ["--strict-json"]);
+
+if (readonlyMcpBaseUrl) {
+  // Per-requester OAuth isolates the Authentik grant of every sender. The
+  // resource server then maps the JWT subject to that person's dedicated
+  // Jira/Confluence/IMAP target. Do not replace mcp.servers as a whole: it
+  // would erase a user's separately managed personal MCP configuration.
+  const remoteMcp = (path) => ({
+    url: new URL(path, readonlyMcpBaseUrl).toString(),
+    transport: "streamable-http",
+    auth: "oauth",
+    oauth: { identity: "per-requester", scope: "openid profile email groups" },
+    requestTimeoutMs: 86400000,
+    connectionTimeoutMs: 30000,
+    sslVerify: true,
+  });
+  for (const [name, path] of Object.entries({
+    jiraReadonly: `${readonlyMcpPathPrefix}/jira-readonly-mcp`,
+    confluenceReadonly: `${readonlyMcpPathPrefix}/confluence-readonly-mcp`,
+    imapReadonly: `${readonlyMcpPathPrefix}/imap-readonly-mcp`,
+    personalMcp: "/mcp/personal",
+  })) {
+    setConfig(`mcp.servers.${name}`, JSON.stringify(remoteMcp(path)), ["--strict-json"]);
+  }
+}
 
 // The Codex binary is a managed OpenClaw harness process inside this same
 // container, not a separate ai-stand service. The yolo preset does not grant

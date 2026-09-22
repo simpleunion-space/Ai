@@ -33,9 +33,15 @@ FROM node-base AS openclaw
 
 ARG OPENCLAW_VERSION=2026.9.4
 
+COPY --chmod=0755 docker/openclaw/apply-authentik-display-name-patch.mjs /tmp/apply-authentik-display-name-patch.mjs
+COPY --chmod=0755 docker/openclaw/apply-authentik-requester-identity-patch.mjs /tmp/apply-authentik-requester-identity-patch.mjs
+
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends git \
     && npm install --global --omit=dev "openclaw@${OPENCLAW_VERSION}" \
+    && node /tmp/apply-authentik-display-name-patch.mjs /usr/local/lib/node_modules/openclaw \
+    && node /tmp/apply-authentik-requester-identity-patch.mjs /usr/local/lib/node_modules/openclaw \
+    && rm -f /tmp/apply-authentik-display-name-patch.mjs /tmp/apply-authentik-requester-identity-patch.mjs \
     && npm cache clean --force \
     && test "$(node --print 'require("/usr/local/lib/node_modules/openclaw/package.json").version')" = "${OPENCLAW_VERSION}" \
     && openclaw --version \
@@ -50,6 +56,12 @@ RUN apt-get update \
 COPY --from=docker-cli --chmod=0755 /usr/local/bin/docker /usr/local/bin/docker
 
 COPY --chown=ai:ai --chmod=0644 docker/openclaw/init.mjs /opt/openclaw/init.mjs
+# OpenClaw accepts a local plugin artifact only when it is owned by root (or
+# UID 0): an unprivileged, mutable plugin directory would be a code-injection
+# path.  Mode 0755 keeps the immutable image-owned files readable and
+# traversable by the non-root gateway process without making that process the
+# plugin owner.
+COPY --chmod=0755 docker/openclaw-gigacode-requester /opt/openclaw/gigacode-requester-plugin
 COPY --chmod=0755 docker/openclaw/entrypoint.sh /usr/local/bin/openclaw-gateway-entrypoint.sh
 
 ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt \

@@ -43,6 +43,10 @@ OPENCLAW_MAX_TOKENS="32768"
 # Codex harness. Generic compose defaults to Guardian; see init.mjs for the
 # exact app-server policy and the container/DIND isolation boundary.
 OPENCLAW_CODEX_EXECUTION_PROFILE="autonomous"
+# Keep the concrete LM Studio quantization in the transport/configuration
+# layer, while presenting the stable model family identifier in Open WebUI.
+# Existing chats still retain their exact provider model ID.
+OPENWEBUI_LOCAL_MODEL_DISPLAY_NAME="qwen/qwen3.8-27b"
 
 EMBEDDING_MODEL_SOURCE="https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/resolve/main/Qwen3-Embedding-4B-Q8_0.gguf"
 EMBEDDING_MODEL_KEY="text-embedding-qwen3-embedding-4b"
@@ -136,10 +140,12 @@ Run on ${AI01_HOST} after the generic ai-stand stack is deployed.
 This script is installation-specific for ${INSTALLATION_NAME}:
   - keeps generic ai-stand source fast: qwen/qwen3-1.7b@q8_0;
   - switches this installation to qwen/qwen3.8-27b@q8_0;
-  - keeps qwen3-embedding-0.6b-q8 as the active embedding model;
+  - keeps qwen3-embedding-4b-q8 as the active embedding model on GPU;
   - starts background downloads for the extended local model catalog;
   - resolves the highest working chat/embedding context from candidate lists;
-  - exposes only qwen3.8-27b-q8 as the LM Studio chat model in Open WebUI.
+  - exposes the local chat model through Agentgateway; the separately managed
+    GigaCode Pipe appears only when the authenticated user has a personal
+    subscription device ID in their own Authentik attributes.
 USAGE
 }
 
@@ -216,6 +222,26 @@ update_service_env() {
   else
     log "$svc environment is already up to date"
   fi
+}
+
+remove_service_env_keys() {
+  local short_name="$1"
+  shift
+  local svc
+  svc="$(service_name "$short_name")"
+  ensure_service "$short_name"
+
+  local -a args=(--detach=true)
+  local key changed="false"
+  for key in "$@"; do
+    if has_env_key "$svc" "$key"; then
+      args+=(--env-rm "$key")
+      changed="true"
+    fi
+  done
+  [ "$changed" = "true" ] || return 0
+  log "Removing retired environment keys from $svc"
+  docker service update "${args[@]}" "$svc" >/dev/null
 }
 
 local_lmstudio_container() {
@@ -580,7 +606,9 @@ sync_openwebui_persistent_config() {
     local -x OPENAI_API_CONFIGS="$OPENWEBUI_OPENAI_API_CONFIGS"
     docker exec -e OPENAI_API_CONFIGS -i "$openwebui_container" python - \
       "$EMBEDDING_MODEL_IDENTIFIER" \
-      "$OPENWEBUI_DEFAULT_MODELS" <<'PY'
+      "$OPENWEBUI_DEFAULT_MODELS" \
+      "$CHAT_MODEL_IDENTIFIER" \
+      "$OPENWEBUI_LOCAL_MODEL_DISPLAY_NAME" <<'PY'
 import json
 import os
 import sqlite3
@@ -591,6 +619,8 @@ import time
 openai_api_configs = os.environ["OPENAI_API_CONFIGS"]
 rag_embedding_model = sys.argv[1]
 default_models = sys.argv[2]
+local_model_id = sys.argv[3]
+local_model_display_name = sys.argv[4]
 
 db_path = "/app/backend/data/webui.db"
 now = int(time.time())
@@ -605,6 +635,8 @@ def parse_json_object(raw, name):
     return value
 
 openai_configs = parse_json_object(openai_api_configs, "OPENAI_API_CONFIGS")
+if not all((local_model_id, local_model_display_name)):
+    raise SystemExit("Open WebUI model ids and display names must not be empty")
 openai_base_urls = [
     cfg.get("base_url", "")
     for _, cfg in sorted(openai_configs.items(), key=lambda item: str(item[0]))
@@ -657,6 +689,34 @@ with sqlite3.connect(db_path, timeout=30) as con:
                 (value, now, key),
             )
             changed = True
+
+    # Open WebUI's manual OpenAI model allowlist uses wire IDs by default.
+    # Persistent base-model overrides affect labels only: Agentgateway still
+    # receives the exact original model ID for new and existing chats.
+    # GigaCode is a managed Pipe, not a static OpenAI model.  Remove only
+    # the obsolete global display override; existing conversations are left
+    # untouched and will show their historical model id.
+    if cur.execute("delete from model where id = ? and user_id is null", ("gigacode/codechat",)).rowcount:
+        changed = True
+    for model_id, display_name in ((local_model_id, local_model_display_name),):
+        row = cur.execute(
+            "select user_id, name, base_model_id, params, meta, is_active from model where id = ?",
+            (model_id,),
+        ).fetchone()
+        actual_model = None if row is None else (row[0], row[1], row[2], row[3], row[4], int(row[5]))
+        expected_model = (None, display_name, None, "{}", "{}", 1)
+        if actual_model is None:
+            cur.execute(
+                "insert into model (id, user_id, base_model_id, name, params, meta, created_at, updated_at, is_active) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (model_id, None, None, display_name, "{}", "{}", now, now, 1),
+            )
+            changed = True
+        elif actual_model != expected_model:
+            cur.execute(
+                "update model set user_id = ?, base_model_id = ?, name = ?, params = ?, meta = ?, updated_at = ?, is_active = ? where id = ?",
+                (None, None, display_name, "{}", "{}", now, 1, model_id),
+            )
+            changed = True
     con.commit()
 
 print("changed=true" if changed else "changed=false")
@@ -671,6 +731,37 @@ PY
   fi
 }
 
+check_openwebui_model_display_names() {
+  local openwebui_container
+  openwebui_container="$(local_service_container openwebui)"
+  [ -n "$openwebui_container" ] || die "Open WebUI task is not running on this node; run this script on ai01"
+
+  local result
+  result="$(
+    docker exec -i "$openwebui_container" python - \
+      "$CHAT_MODEL_IDENTIFIER" \
+      "$OPENWEBUI_LOCAL_MODEL_DISPLAY_NAME" <<'PY'
+import sqlite3
+import sys
+
+local_model_id, local_display_name = sys.argv[1:]
+with sqlite3.connect("/app/backend/data/webui.db", timeout=30) as con:
+    rows = {
+        model_id: con.execute(
+            "select user_id, base_model_id, name, params, meta, is_active from model where id = ?",
+            (model_id,),
+        ).fetchone()
+        for model_id in (local_model_id,)
+    }
+expected = {
+    local_model_id: (None, None, local_display_name, "{}", "{}", 1),
+}
+print("ok" if all(rows[model_id] is not None and (rows[model_id][0], rows[model_id][1], rows[model_id][2], rows[model_id][3], rows[model_id][4], int(rows[model_id][5])) == expected[model_id] for model_id in expected) else "invalid")
+PY
+  )"
+  [ "$result" = "ok" ] || die "Open WebUI model display-name override is invalid"
+}
+
 apply_profile() {
   require_commands
 
@@ -681,7 +772,9 @@ apply_profile() {
     "OPENAI_API_CONFIGS=$OPENWEBUI_OPENAI_API_CONFIGS" \
     "OPENAI_API_KEYS=$OPENWEBUI_OPENAI_API_KEYS" \
     "DEFAULT_MODELS=$OPENWEBUI_DEFAULT_MODELS" \
-    "RAG_EMBEDDING_MODEL=$EMBEDDING_MODEL_IDENTIFIER"
+    "RAG_EMBEDDING_MODEL=$EMBEDDING_MODEL_IDENTIFIER" \
+    "RAG_OPENAI_API_BASE_URL=http://agentgateway:4000/v1" \
+    "RAG_OPENAI_API_KEY=$AGENTGATEWAY_OPENWEBUI_TOKEN"
 
   wait_replicas openwebui 1/1 900
   sync_openwebui_persistent_config
@@ -692,9 +785,14 @@ apply_profile() {
     "LMSTUDIO_CONTEXT_LENGTH=$CHAT_CONTEXT_LENGTH" \
     "OPENCLAW_MAX_TOKENS=$OPENCLAW_MAX_TOKENS" \
     "OPENCLAW_CODEX_EXECUTION_PROFILE=$OPENCLAW_CODEX_EXECUTION_PROFILE" \
+    "OPENCLAW_AUTHENTIK_TRUSTED_PROXY_ENABLED=${OPENCLAW_AUTHENTIK_TRUSTED_PROXY_ENABLED:-0}" \
+    "OPENCLAW_TRUSTED_PROXIES=${OPENCLAW_TRUSTED_PROXIES:-127.0.0.1,::1}" \
     "OPENCLAW_LANCEDB_ENABLED=1" \
     "OPENCLAW_LANCEDB_EMBEDDING_MODEL=$EMBEDDING_MODEL_IDENTIFIER" \
     "OPENCLAW_LANCEDB_EMBEDDING_DIMENSIONS=$EMBEDDING_DIMENSIONS"
+
+  remove_service_env_keys openclaw-gateway \
+    OPENCLAW_GIGACODE_ENABLED
 
   wait_replicas openclaw-gateway 1/1 900
 
@@ -784,6 +882,8 @@ verify_profile() {
     || die "OpenClaw max tokens env is not $OPENCLAW_MAX_TOKENS"
   [ "$(current_env_value "$svc" OPENCLAW_CODEX_EXECUTION_PROFILE)" = "$OPENCLAW_CODEX_EXECUTION_PROFILE" ] \
     || die "OpenClaw Codex execution profile is not $OPENCLAW_CODEX_EXECUTION_PROFILE"
+  ! has_env_key "$svc" OPENCLAW_GIGACODE_ENABLED \
+    || die "Legacy static OpenClaw GigaCode provider must be absent"
   [ "$(current_env_value "$svc" OPENCLAW_LANCEDB_ENABLED)" = "1" ] \
     || die "OpenClaw LanceDB is not enabled"
   [ "$(current_env_value "$svc" OPENCLAW_LANCEDB_EMBEDDING_MODEL)" = "$EMBEDDING_MODEL_IDENTIFIER" ] \
@@ -794,6 +894,7 @@ verify_profile() {
   wait_replicas lmstudio 1/1 30
   wait_replicas openwebui 1/1 30
   wait_replicas openclaw-gateway 1/1 30
+  check_openwebui_model_display_names
 
   log "kurkin-family__labs__m01 model profile verify ok"
 }

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "authentik": {
+    "address": "https://authentik.example.invalid",
+    "apiTokenFile": "/mnt/storage/_secrets/readonly-mcp-authentik-api-token",
+    "aiUsersGroup": "ai-users"
+  },
+  "upstreams": {
+    "jiraBaseUrl": "https://jira.example.invalid/jira",
+    "confluenceBaseUrl": "https://confluence.example.invalid/wiki",
+    "imapHost": "imap.example.invalid",
+    "imapPort": 993,
+    "imapTlsMode": "implicit",
+    "caFile": "/etc/ssl/certs/ca-certificates.crt"
+  },
+  "gigacode": {
+    "enabled": false
+  },
+  "metamcp": {
+    "enabled": true
+  },
+  "userOverrides": {
+    "upstreamsEnabled": false
+  }
+}

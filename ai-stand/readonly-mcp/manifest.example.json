@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "configurationFingerprint": "sha256-of-non-secret-upstream-settings",
+  "users": [
+    {
+      "subject": "00000000-0000-0000-0000-000000000000",
+      "slug": "u-000000000000000000000000",
+      "services": {
+        "jira": {
+          "credentialSecret": "ai-stand-mcp-jira-u-000000000000000000000000-credentials-v3",
+          "internalTokenSecret": "ai-stand-mcp-jira-u-000000000000000000000000-internal-v3",
+          "secretVersion": 3,
+          "valueFingerprint": "0123456789abcdef"
+        }
+      }
+    }
+  ],
+  "retiredSecrets": []
+}

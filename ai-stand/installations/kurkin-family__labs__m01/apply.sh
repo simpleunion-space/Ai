@@ -18,6 +18,9 @@ AI_STAND_DIR="$(cd -- "${INSTALLATION_DIR}/../.." && pwd)"
 ACCELERATOR="$DEFAULT_ACCELERATOR"
 MANAGER_JOIN_TOKEN=""
 USE_SUDO="auto"
+ONBOARD_USERNAME=""
+ONBOARD_EMAIL=""
+ONBOARD_GROUPS="ai-users"
 
 usage() {
   cat <<USAGE
@@ -25,16 +28,19 @@ Usage: $(basename "$0") <command> [options]
 
 Commands:
   preflight-ai01
-  preflight-linux01
+  preflight-ai02
   host-ai01
-  host-linux01
+  host-ai02
   images-ai01
-  images-linux01
+  images-ai02
   deploy
+  reconcile-mcp
   configure-authentik
+  onboard-readonly-mcp-user --username <u> --email <e> [--groups ai-users]
+  migrate-metamcp-tenants
   configure-portainer
   verify-ai01
-  verify-linux01
+  verify-ai02
   credentials
   model-apply
   model-status
@@ -42,8 +48,11 @@ Commands:
 
 Options:
   --accelerator auto|cpu|amd|nvidia    Default: ${DEFAULT_ACCELERATOR}
-  --manager-join-token <token>         Required when linux01 must join Swarm
+  --manager-join-token <token>         Required when ai02 must join Swarm
   --sudo auto|always|never             Default: auto
+  --username <name>                    Required for onboard-readonly-mcp-user
+  --email <address>                    Required for onboard-readonly-mcp-user
+  --groups <csv>                       For onboard-readonly-mcp-user. Default: ai-users
   -h, --help
 
 This wrapper is installation-specific for ${INSTALLATION_NAME}.
@@ -88,6 +97,33 @@ parse_options() {
         ;;
       --sudo=*)
         USE_SUDO="${1#*=}"
+        shift
+        ;;
+      --username)
+        [ "$#" -ge 2 ] || die "--username requires a value"
+        ONBOARD_USERNAME="$2"
+        shift 2
+        ;;
+      --username=*)
+        ONBOARD_USERNAME="${1#*=}"
+        shift
+        ;;
+      --email)
+        [ "$#" -ge 2 ] || die "--email requires a value"
+        ONBOARD_EMAIL="$2"
+        shift 2
+        ;;
+      --email=*)
+        ONBOARD_EMAIL="${1#*=}"
+        shift
+        ;;
+      --groups)
+        [ "$#" -ge 2 ] || die "--groups requires a value"
+        ONBOARD_GROUPS="$2"
+        shift 2
+        ;;
+      --groups=*)
+        ONBOARD_GROUPS="${1#*=}"
         shift
         ;;
       -h|--help|help)
@@ -155,7 +191,7 @@ run_generic_apply() {
     args+=(--accelerator "$ACCELERATOR")
   fi
 
-  if [ "$node_name" = "$LINUX01_NODE_NAME" ] && [ -n "$MANAGER_JOIN_TOKEN" ]; then
+  if [ "$node_name" = "$AI02_NODE_NAME" ] && [ -n "$MANAGER_JOIN_TOKEN" ]; then
     args+=(--manager-join-token "$MANAGER_JOIN_TOKEN")
   fi
 
@@ -245,22 +281,22 @@ parse_options "$@"
 
 case "$command_name" in
   preflight-ai01)
-    run_generic_apply preflight "$AI01_NODE_NAME" "$AI01_IP" "$LINUX01_IP"
+    run_generic_apply preflight "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
     ;;
-  preflight-linux01)
-    run_generic_apply preflight "$LINUX01_NODE_NAME" "$LINUX01_IP" "$AI01_IP"
+  preflight-ai02)
+    run_generic_apply preflight "$AI02_NODE_NAME" "$AI02_IP" "$AI01_IP"
     ;;
   host-ai01)
-    run_generic_apply host "$AI01_NODE_NAME" "$AI01_IP" "$LINUX01_IP"
+    run_generic_apply host "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
     ;;
-  host-linux01)
-    run_generic_apply host "$LINUX01_NODE_NAME" "$LINUX01_IP" "$AI01_IP"
+  host-ai02)
+    run_generic_apply host "$AI02_NODE_NAME" "$AI02_IP" "$AI01_IP"
     ;;
   images-ai01)
     run_generic_images "$AI01_NODE_NAME"
     ;;
-  images-linux01)
-    run_generic_images "$LINUX01_NODE_NAME"
+  images-ai02)
+    run_generic_images "$AI02_NODE_NAME"
     ;;
   deploy)
     # `ai-stand/apply.sh deploy` itself resets the model profile back to
@@ -274,7 +310,7 @@ case "$command_name" in
     # time the first time (model-apply retries multiple context sizes) -
     # that cost was already unavoidable on the very next model-apply run
     # either way, just now paid immediately instead of silently deferred.
-    run_generic_apply deploy "$AI01_NODE_NAME" "$AI01_IP" "$LINUX01_IP"
+    run_generic_apply deploy "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
     # configure-authentik right after deploy, unconditionally, for the same
     # reason model-apply already runs unconditionally below: on a genuinely
     # fresh install (or a from-scratch Authentik data wipe), agentgateway
@@ -290,23 +326,35 @@ case "$command_name" in
     # as the very next manual step (see README's rollout order) - making it
     # automatic here means a plain `deploy` can't leave the stack in that
     # half-working state even if nobody runs the next command right away.
-    run_generic_apply configure-authentik "$AI01_NODE_NAME" "$AI01_IP" "$LINUX01_IP"
+    run_generic_apply configure-authentik "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
     run_model_profile apply
     ;;
+  reconcile-mcp)
+    run_generic_apply reconcile-mcp "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
+    ;;
   configure-authentik)
-    run_generic_apply configure-authentik "$AI01_NODE_NAME" "$AI01_IP" "$LINUX01_IP"
+    run_generic_apply configure-authentik "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
+    ;;
+  onboard-readonly-mcp-user)
+    [ -n "$ONBOARD_USERNAME" ] || die "--username is required for onboard-readonly-mcp-user"
+    [ -n "$ONBOARD_EMAIL" ] || die "--email is required for onboard-readonly-mcp-user"
+    run_generic_apply onboard-readonly-mcp-user "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP" \
+      --username "$ONBOARD_USERNAME" --email "$ONBOARD_EMAIL" --groups "$ONBOARD_GROUPS"
+    ;;
+  migrate-metamcp-tenants)
+    run_generic_apply migrate-metamcp-tenants "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
     ;;
   configure-portainer)
-    run_generic_apply configure-portainer "$AI01_NODE_NAME" "$AI01_IP" "$LINUX01_IP"
+    run_generic_apply configure-portainer "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
     ;;
   verify-ai01)
-    run_generic_apply verify "$AI01_NODE_NAME" "$AI01_IP" "$LINUX01_IP"
+    run_generic_apply verify "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
     ;;
-  verify-linux01)
-    run_generic_apply verify "$LINUX01_NODE_NAME" "$LINUX01_IP" "$AI01_IP"
+  verify-ai02)
+    run_generic_apply verify "$AI02_NODE_NAME" "$AI02_IP" "$AI01_IP"
     ;;
   credentials)
-    run_generic_apply credentials "$AI01_NODE_NAME" "$AI01_IP" "$LINUX01_IP"
+    run_generic_apply credentials "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
     ;;
   model-apply)
     run_model_profile apply

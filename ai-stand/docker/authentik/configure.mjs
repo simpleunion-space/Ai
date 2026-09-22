@@ -9,6 +9,7 @@ const config = {
   portainerClientSecret: requiredEnv("AUTHENTIK_PORTAINER_CLIENT_SECRET"),
   metamcpClientSecret: requiredEnv("AUTHENTIK_METAMCP_CLIENT_SECRET"),
   agentgatewayClientSecret: requiredEnv("AUTHENTIK_AGENTGATEWAY_CLIENT_SECRET"),
+  coderClientSecret: requiredEnv("AUTHENTIK_CODER_CLIENT_SECRET"),
 };
 
 const groups = {
@@ -16,11 +17,19 @@ const groups = {
   users: "ai-users",
 };
 
+for (const [role, name] of Object.entries(groups)) {
+  if (!/^ai-[a-z0-9-]+$/.test(name)) {
+    throw new Error(`Managed Authentik group ${role} must use the ai- prefix: ${name}`);
+  }
+}
+
 const hosts = {
   openwebui: env("AUTHENTIK_OPENWEBUI_URL", "https://openwebui.local").replace(/\/+$/, ""),
+  openclaw: env("AUTHENTIK_OPENCLAW_URL", "https://openclaw.local").replace(/\/+$/, ""),
   portainer: env("AUTHENTIK_PORTAINER_URL", "https://portainer.local").replace(/\/+$/, ""),
   metamcp: env("AUTHENTIK_METAMCP_URL", "https://metamcp.local").replace(/\/+$/, ""),
   agentgateway: env("AUTHENTIK_AGENTGATEWAY_URL", "https://agentgateway.local").replace(/\/+$/, ""),
+  coder: env("AUTHENTIK_CODER_URL", "https://coder.local").replace(/\/+$/, ""),
 };
 
 // Vendored into docker/authentik/icons/ and served by nginx at
@@ -41,6 +50,11 @@ const icons = {
   portainer: `${config.publicUrl}/app-icons/portainer.svg`,
   metamcp: `${config.publicUrl}/app-icons/metamcp.ico`,
   agentgateway: `${config.publicUrl}/app-icons/agentgateway.svg`,
+  // The OAuth resource-server contract is Agentgateway itself, not a
+  // separate product. Reuse its official mark instead of a look-alike tile.
+  agentgatewayMcp: `${config.publicUrl}/app-icons/agentgateway.svg`,
+  openclaw: `${config.publicUrl}/app-icons/openclaw.png`,
+  coder: `${config.publicUrl}/app-icons/coder.svg`,
 };
 
 function env(name, fallback) {
@@ -357,6 +371,140 @@ async function ensureOAuthProvider(name, payload) {
   return created;
 }
 
+async function ensureProxyProvider(name, payload) {
+  const matches = await list("/providers/proxy/", { name__iexact: name });
+  const existing = matches.find((provider) => provider.name === name);
+  if (existing?.pk) {
+    const updated = await api("PATCH", `/providers/proxy/${existing.pk}/`, payload);
+    log(`Proxy provider ensured: ${name}`);
+    return updated;
+  }
+
+  const created = await api("POST", "/providers/proxy/", payload);
+  log(`Proxy provider created: ${name}`);
+  return created;
+}
+
+async function getFlowBySlug(slug) {
+  const flow = await api("GET", `/flows/instances/${encodeURIComponent(slug)}/`, undefined, { allow404: true });
+  if (!flow?.pk) {
+    throw new Error(`Cannot find Authentik flow with slug=${slug}`);
+  }
+  return flow.pk;
+}
+
+async function ensurePrompt(fieldKey, payload) {
+  const matches = await list("/stages/prompt/prompts/", { field_key: fieldKey });
+  const existing = matches.find((item) => item.field_key === fieldKey);
+  if (existing?.pk) {
+    const updated = await api("PATCH", `/stages/prompt/prompts/${existing.pk}/`, payload);
+    log(`Prompt field ensured: ${fieldKey}`);
+    return updated;
+  }
+
+  const created = await api("POST", "/stages/prompt/prompts/", { ...payload, field_key: fieldKey });
+  log(`Prompt field created: ${fieldKey}`);
+  return created;
+}
+
+async function ensurePromptStage(name, fieldPks) {
+  const matches = await list("/stages/prompt/stages/", { search: name });
+  const existing = matches.find((item) => item.name === name);
+  const payload = { name, fields: fieldPks };
+  if (existing?.pk) {
+    const updated = await api("PATCH", `/stages/prompt/stages/${existing.pk}/`, payload);
+    log(`Prompt stage ensured: ${name}`);
+    return updated;
+  }
+
+  const created = await api("POST", "/stages/prompt/stages/", payload);
+  log(`Prompt stage created: ${name}`);
+  return created;
+}
+
+async function ensureUserWriteStage(name) {
+  const matches = await list("/stages/user_write/", { search: name });
+  const existing = matches.find((item) => item.name === name);
+  // This flow edits an already-authenticated user's own profile, not
+  // registration - the create_users_as_inactive/user_creation_mode-style
+  // fields that matter for an enrollment flow's write stage don't apply.
+  const payload = { name };
+  if (existing?.pk) {
+    const updated = await api("PATCH", `/stages/user_write/${existing.pk}/`, payload);
+    log(`User write stage ensured: ${name}`);
+    return updated;
+  }
+
+  const created = await api("POST", "/stages/user_write/", payload);
+  log(`User write stage created: ${name}`);
+  return created;
+}
+
+async function ensureFlowStageBinding(flowPk, stagePk, order) {
+  const bindings = await list("/flows/bindings/", { target: flowPk, stage: stagePk });
+  const existing = bindings.find((item) => item.target === flowPk && item.stage === stagePk);
+  const payload = { target: flowPk, stage: stagePk, order, evaluate_on_plan: true, re_evaluate_policies: false };
+  if (existing?.pk) {
+    await api("PATCH", `/flows/bindings/${existing.pk}/`, payload);
+    log(`Flow stage binding ensured at order ${order}`);
+    return;
+  }
+
+  await api("POST", "/flows/bindings/", payload);
+  log(`Flow stage binding created at order ${order}`);
+}
+
+// Lets each ai-users member edit their own readonly-mcp/GigaCode
+// credentials (and, only where the installation opts in via
+// reconciler.json's userOverrides.upstreamsEnabled, their own upstream
+// endpoints) from the standard Authentik user-settings page (/if/user/),
+// instead of a separate secret store - this replaces an earlier Vault-based
+// design entirely. reconcile.py reads these same flat "ai_stand_mcp_*"
+// attribute keys directly (see CREDENTIAL_ATTRIBUTES / UPSTREAM_OVERRIDE_
+// ATTRIBUTES there); keep both lists in sync by hand. Appended at high
+// binding orders (200+) onto default-user-settings-flow's *existing*
+// stages, never reordering or replacing Authentik's own profile-editing
+// stages already bound there.
+//
+// This is the one part of this file with no equivalent already proven
+// elsewhere in it (every other ensureX() manages providers/applications,
+// never Prompt/Stage/FlowStageBinding objects) - confirm live after
+// deploying that /if/user/ actually renders this as an editable card before
+// relying on it.
+async function ensureMcpSelfServiceAttributes(userSettingsFlowPk) {
+  const fields = [
+    { key: "ai_stand_mcp_jira_pat", label: "Jira personal access token", subText: "Used only by your own jira-readonly-mcp container.", order: 10 },
+    { key: "ai_stand_mcp_confluence_pat", label: "Confluence personal access token", subText: "Used only by your own confluence-readonly-mcp container.", order: 20 },
+    { key: "ai_stand_mcp_imap_username", label: "IMAP username", subText: "Used only by your own imap-readonly-mcp container.", order: 30 },
+    { key: "ai_stand_mcp_imap_password", label: "IMAP password", subText: "Used only by your own imap-readonly-mcp container.", order: 40 },
+    { key: "ai_stand_mcp_gigacode_device_id", label: "GigaCode Device ID", subText: "Used only by your own personal GigaCode subscription bridge.", order: 50 },
+    { key: "ai_stand_mcp_jira_base_url", label: "Jira base URL (optional override)", subText: "Leave blank to use this installation's default. Only takes effect where the installation allows per-user upstream overrides.", order: 60 },
+    { key: "ai_stand_mcp_confluence_base_url", label: "Confluence base URL (optional override)", subText: "Leave blank to use this installation's default. Only takes effect where the installation allows per-user upstream overrides.", order: 70 },
+    { key: "ai_stand_mcp_imap_host", label: "IMAP host (optional override)", subText: "Leave blank to use this installation's default. Only takes effect where the installation allows per-user upstream overrides.", order: 80 },
+  ];
+
+  const fieldPks = [];
+  for (const field of fields) {
+    const prompt = await ensurePrompt(`attributes.${field.key}`, {
+      name: field.key,
+      label: field.label,
+      type: "text",
+      required: false,
+      placeholder: "",
+      sub_text: field.subText,
+      order: field.order,
+    });
+    fieldPks.push(prompt.pk);
+  }
+
+  const promptStage = await ensurePromptStage("ai-stand-mcp-credentials-prompt", fieldPks);
+  const writeStage = await ensureUserWriteStage("ai-stand-mcp-credentials-write");
+  await ensureFlowStageBinding(userSettingsFlowPk, promptStage.pk, 200);
+  await ensureFlowStageBinding(userSettingsFlowPk, writeStage.pk, 201);
+
+  log("Self-service readonly-mcp/GigaCode attribute stage ensured on the user-settings flow");
+}
+
 async function getApplication(slug) {
   return api("GET", `/core/applications/${encodeURIComponent(slug)}/`, undefined, { allow404: true });
 }
@@ -455,11 +603,6 @@ async function cleanupStaleProxyArtifacts() {
   const stale = [
     ["openwebui-proxy", "ai-stand-openwebui-proxy"],
     ["portainer-proxy", "ai-stand-portainer-proxy"],
-    // OpenClaw is protected by its own gateway token, not by an Authentik
-    // forward-auth layer. The proxy was never bound by Nginx, so delete it
-    // during the next configuration run rather than leaving a misleading
-    // dormant application/provider pair behind.
-    ["openclaw-proxy", "ai-stand-openclaw-proxy"],
     // lmstudio has no viable external-auth story upstream (LM Studio has no
     // "Require Authentication" support at all - lmstudio-ai/lmstudio-bug-
     // tracker#1674), so this Authentik Application/Provider pair is
@@ -483,6 +626,30 @@ async function cleanupStaleProxyArtifacts() {
   // application-only rename, not a proxy-provider pair, so it doesn't fit
   // the `stale` array shape above.
   await deleteApplicationIfExists("portainer-oidc");
+}
+
+async function deleteOAuth2ProviderIfExists(name) {
+  const matches = await list("/providers/oauth2/", { search: name });
+  const existing = matches.find((provider) => provider.name === name);
+  if (!existing?.pk) {
+    log(`Stale OIDC provider absent: ${name}`);
+    return;
+  }
+  await api("DELETE", `/providers/oauth2/${existing.pk}/`);
+  log(`Stale OIDC provider deleted: ${name}`);
+}
+
+// Vault was removed entirely from ai-stand (readonly-mcp/GigaCode
+// credentials moved to Authentik user attributes - see
+// ensureMcpSelfServiceAttributes above). Its Application used a native OIDC
+// provider, not a Proxy provider, so it needs its own delete path rather
+// than fitting cleanupStaleProxyArtifacts()'s stale array shape. An
+// Application referencing a deleted provider is left orphaned by Authentik's
+// API (provider is nullable), so delete the Application first, same order
+// as the proxy cleanup above.
+async function cleanupRetiredVaultArtifacts() {
+  await deleteApplicationIfExists("vault-ai-stand");
+  await deleteOAuth2ProviderIfExists("ai-stand-vault-oidc");
 }
 
 async function verifyOpenWebuiDiscovery() {
@@ -559,6 +726,9 @@ async function verifyApplicationIcons() {
     portainer: icons.portainer,
     metamcp: icons.metamcp,
     agentgateway: icons.agentgateway,
+    "agentgateway-mcp": icons.agentgatewayMcp,
+    openclaw: icons.openclaw,
+    coder: icons.coder,
   };
 
   // meta_icon is set as a normal field on the application (see
@@ -590,6 +760,7 @@ async function main() {
   await waitForApi();
 
   const flows = {
+    authentication: await getFlow(["default-authentication-flow"], "authentication"),
     authorization: await getFlow(["default-provider-authorization-explicit-consent", "default-provider-authorization-implicit-consent"], "authorization"),
     invalidation: await getFlow(["default-provider-invalidation-flow"], "invalidation"),
   };
@@ -633,7 +804,11 @@ async function main() {
       },
     ],
     include_claims_in_id_token: true,
-    sub_mode: "user_email",
+    // Personal MCP/GigaCode routes are selected solely by immutable
+    // Authentik subject. Open WebUI merges existing accounts by verified
+    // email, so this migration preserves user records while allowing its
+    // managed Pipe to obtain the same subject as Agentgateway MCP.
+    sub_mode: "user_uuid",
     issuer_mode: "per_provider",
   });
 
@@ -717,6 +892,83 @@ async function main() {
     issuer_mode: "per_provider",
   });
 
+  // Agentgateway's MCP resource-server adapter returns this pre-registered
+  // public PKCE client to MCP consumers because upstream Authentik does not
+  // implement Dynamic Client Registration. Its subject is a stable user UUID
+  // (not the mutable email used by UI login providers), which is the sole
+  // key used to select a user's private read-only MCP targets.
+  const agentgatewayMcpProvider = await ensureOAuthProvider("ai-stand-agentgateway-mcp", {
+    name: "ai-stand-agentgateway-mcp",
+    authorization_flow: flows.authorization,
+    invalidation_flow: flows.invalidation,
+    property_mappings: propertyMappings,
+    signing_key: signingKey,
+    grant_types: ["authorization_code", "refresh_token"],
+    client_type: "public",
+    client_id: "agentgateway-mcp",
+    redirect_uris: [
+      {
+        matching_mode: "regex",
+        url: `^${regexEscape(hosts.openwebui)}/oauth/clients/mcp:[A-Za-z0-9_.-]+/callback$`,
+      },
+      {
+        matching_mode: "strict",
+        url: `${hosts.openclaw}/oauth/mcp/callback`,
+      },
+    ],
+    include_claims_in_id_token: true,
+    sub_mode: "user_uuid",
+    issuer_mode: "per_provider",
+  });
+
+  // OpenClaw uses its supported trusted-proxy mode rather than a native OIDC
+  // login. The Authentik outpost authorizes the browser and supplies its
+  // stable hashed user identifier; Nginx keeps owning the application proxy.
+  const openclawProxyProvider = await ensureProxyProvider("ai-stand-openclaw-proxy", {
+    name: "ai-stand-openclaw-proxy",
+    authentication_flow: flows.authentication,
+    authorization_flow: flows.authorization,
+    invalidation_flow: flows.invalidation,
+    property_mappings: [],
+    internal_host: "",
+    internal_host_ssl_validation: true,
+    external_host: hosts.openclaw,
+    skip_path_regex: "",
+    basic_auth_enabled: false,
+    basic_auth_password_attribute: "",
+    basic_auth_user_attribute: "",
+    mode: "forward_single",
+    intercept_header_auth: false,
+    cookie_domain: "",
+    jwt_federation_sources: [],
+    jwt_federation_providers: [],
+    access_token_validity: "hours=1",
+    refresh_token_validity: "days=30",
+  });
+
+  // Coder owns its browser session and receives no AI/MCP credential. Its
+  // OIDC contract merely limits sign-in to the same ai-stand user groups.
+  const coderProvider = await ensureOAuthProvider("ai-stand-coder-oidc", {
+    name: "ai-stand-coder-oidc",
+    authorization_flow: flows.authorization,
+    invalidation_flow: flows.invalidation,
+    property_mappings: propertyMappings,
+    signing_key: signingKey,
+    grant_types: ["authorization_code", "refresh_token"],
+    client_type: "confidential",
+    client_id: "coder",
+    client_secret: config.coderClientSecret,
+    redirect_uris: [
+      {
+        matching_mode: "strict",
+        url: `${hosts.coder}/api/v2/users/oidc/callback`,
+      },
+    ],
+    include_claims_in_id_token: true,
+    sub_mode: "user_uuid",
+    issuer_mode: "per_provider",
+  });
+
   const openwebuiApp = await ensureApplication("openwebui", {
     name: "Open WebUI",
     provider: openwebuiProvider.pk,
@@ -743,23 +995,21 @@ async function main() {
   });
   await bindApplicationGroups(portainerApp, [adminGroup]);
 
-  // MCP client endpoints (OpenClaw/opencode) authenticate with their own
-  // per-endpoint bearer API keys, not SSO - this application only gates the
-  // human admin-UI login. Admin-only like Portainer: this is a
-  // single-admin tool, not something every ai-users member should get an
-  // account on just by being able to log in.
+  // MetaMCP remains the self-service namespace/endpoint management UI. Its
+  // public native registration routes stay blocked by nginx; authorised
+  // ai-users and ai-admins sign in through Authentik instead.
   const metamcpApp = await ensureApplication("metamcp", {
     name: "MetaMCP",
     provider: metamcpProvider.pk,
     backchannel_providers: [],
     meta_launch_url: hosts.metamcp,
     meta_icon: icons.metamcp,
-    meta_description: "ai-stand MetaMCP OIDC application (admin UI login only)",
+    meta_description: "ai-stand MetaMCP OIDC application (personal MCP management)",
     meta_publisher: "ai-stand",
     open_in_new_tab: false,
     policy_engine_mode: "any",
   });
-  await bindApplicationGroups(metamcpApp, [adminGroup]);
+  await bindApplicationGroups(metamcpApp, [userGroup, adminGroup]);
 
   // Admin-only: the only thing a human ever reaches via OIDC on
   // agentgateway is its read-only admin/observability console (ui: in
@@ -781,10 +1031,57 @@ async function main() {
   });
   await bindApplicationGroups(agentgatewayApp, [adminGroup]);
 
-  // No service uses Authentik forward-auth. Clear the embedded outpost
-  // before deleting legacy providers so an upgrade can remove them safely.
-  await ensureEmbeddedOutpost([]);
+  // Authentik only publishes a per-provider discovery document after an
+  // Application references that provider. This application is the OAuth
+  // authorization contract for MCP clients, not an Agentgateway UI entry;
+  // the actual MCP route policy remains enforced by Agentgateway.
+  const agentgatewayMcpApp = await ensureApplication("agentgateway-mcp", {
+    name: "Agentgateway MCP authorization",
+    provider: agentgatewayMcpProvider.pk,
+    backchannel_providers: [],
+    meta_launch_url: hosts.agentgateway,
+    meta_icon: icons.agentgatewayMcp,
+    meta_description: "ai-stand OAuth authorization contract for MCP clients",
+    meta_publisher: "ai-stand",
+    open_in_new_tab: false,
+    policy_engine_mode: "any",
+  });
+  await bindApplicationGroups(agentgatewayMcpApp, [userGroup, adminGroup]);
+
+  const openclawApp = await ensureApplication("openclaw", {
+    name: "OpenClaw",
+    provider: openclawProxyProvider.pk,
+    backchannel_providers: [],
+    meta_launch_url: hosts.openclaw,
+    meta_icon: icons.openclaw,
+    meta_description: "ai-stand OpenClaw trusted-proxy application",
+    meta_publisher: "ai-stand",
+    open_in_new_tab: false,
+    policy_engine_mode: "any",
+  });
+  await bindApplicationGroups(openclawApp, [userGroup, adminGroup]);
+
+  const coderApp = await ensureApplication("coder", {
+    name: "Coder",
+    provider: coderProvider.pk,
+    backchannel_providers: [],
+    meta_launch_url: hosts.coder,
+    meta_icon: icons.coder,
+    meta_description: "ai-stand Coder workspace control plane",
+    meta_publisher: "ai-stand",
+    open_in_new_tab: false,
+    policy_engine_mode: "any",
+  });
+  await bindApplicationGroups(coderApp, [userGroup, adminGroup]);
+
+  const userSettingsFlowPk = await getFlowBySlug("default-user-settings-flow");
+  await ensureMcpSelfServiceAttributes(userSettingsFlowPk);
+
+  // The embedded outpost answers only OpenClaw forward-auth subrequests;
+  // Nginx remains the sole OpenClaw application reverse proxy.
+  await ensureEmbeddedOutpost([openclawProxyProvider.pk]);
   await cleanupStaleProxyArtifacts();
+  await cleanupRetiredVaultArtifacts();
   await verifyApplicationIcons();
   await verifyOpenWebuiDiscovery();
   await verifyPortainerDiscovery();

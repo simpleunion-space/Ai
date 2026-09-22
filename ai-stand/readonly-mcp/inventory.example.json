@@ -1,0 +1,5 @@
+{
+  "deprecated": "Static inventories are no longer a deployment input. See reconciler.example.json and manifest.example.json.",
+  "version": 0,
+  "users": []
+}

@@ -1,0 +1,79 @@
+# Version-pinned OpenClaw side of the personal GigaCode subscription plane.
+# The adapter has no GigaCode Device ID of its own.  It receives only an
+# opaque session id from the managed OpenClaw provider
+# plugin, turns that into a short-lived broker JWT, and forwards it to the
+# exact Agentgateway subject route.  The mounted state is deliberately one
+# file rather than the complete OpenClaw home.
+services:
+  openclaw-gateway:
+    environment:
+      OPENCLAW_GIGACODE_SUBSCRIPTION_ENABLED: "1"
+      OPENCLAW_GIGACODE_MODEL_ID: codechat
+      OPENCLAW_GIGACODE_DISPLAY_NAME: gigacode
+      OPENCLAW_GIGACODE_CONTEXT_WINDOW: "65536"
+      OPENCLAW_GIGACODE_ADAPTER_BASE_URL: http://openclaw-gigacode-adapter:8080/v1
+      OPENCLAW_GIGACODE_ADAPTER_BEARER_FILE: /run/secrets/ai-stand-openclaw-gigacode-adapter
+      OPENCLAW_GIGACODE_SESSION_MAP: /home/ai/.openclaw/gigacode-requester/sessions.json
+      OPENCLAW_GIGACODE_TELEGRAM_SUBJECT_MAP_FILE: /run/secrets/ai-stand-openclaw-gigacode-requester-map
+    secrets:
+      - source: ai-stand-openclaw-gigacode-adapter
+        target: ai-stand-openclaw-gigacode-adapter
+        mode: 0444
+      - source: ai-stand-openclaw-gigacode-requester-map
+        target: ai-stand-openclaw-gigacode-requester-map
+        mode: 0444
+
+  openclaw-gigacode-adapter:
+    image: ai-stand-openclaw-gigacode-adapter:2026.09.21-1
+    user: "10000:20000"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      GIGACODE_IDENTITY_BROKER_URL: http://gigacode-identity-broker:8080
+      AGENTGATEWAY_INTERNAL_URL: http://agentgateway:4000
+      OPENCLAW_GIGACODE_ADAPTER_BEARER_FILE: /run/secrets/ai-stand-openclaw-gigacode-adapter
+      OPENCLAW_GIGACODE_BROKER_CALLER_FILE: /run/secrets/ai-stand-gigacode-broker-openclaw-caller
+      OPENCLAW_GIGACODE_SESSION_MAP: /state/sessions.json
+      TZ: Europe/Moscow
+    secrets:
+      - source: ai-stand-openclaw-gigacode-adapter
+        target: ai-stand-openclaw-gigacode-adapter
+        mode: 0444
+      - source: ai-stand-gigacode-broker-openclaw-caller
+        target: ai-stand-gigacode-broker-openclaw-caller
+        mode: 0444
+    volumes:
+      - type: bind
+        source: /mnt/storage/openclaw-data/gateway/.openclaw/gigacode-requester/sessions.json
+        target: /state/sessions.json
+        read_only: true
+    networks:
+      ai-core:
+        aliases:
+          - openclaw-gigacode-adapter
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.openclaw == true
+      restart_policy:
+        condition: any
+        delay: 10s
+
+secrets:
+  ai-stand-openclaw-gigacode-adapter:
+    external: true
+  ai-stand-gigacode-broker-openclaw-caller:
+    external: true
+  ai-stand-openclaw-gigacode-requester-map:
+    external: true
+
+networks:
+  ai-core:
+    external: true
+    name: ai-stand_ai-core

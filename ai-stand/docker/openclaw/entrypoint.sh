@@ -72,6 +72,34 @@ ensure_lancedb_plugin() {
     }
 }
 
+ensure_gigacode_requester_plugin() {
+    if ! is_enabled "${OPENCLAW_GIGACODE_SUBSCRIPTION_ENABLED:-0}"; then
+        return 0
+    fi
+
+    plugin_source="/opt/openclaw/gigacode-requester-plugin"
+    plugin_state_dir="${OPENCLAW_STATE_DIR:?OPENCLAW_STATE_DIR is required}/ai-stand"
+    marker="${plugin_state_dir}/gigacode-requester-plugin.sha256"
+    expected="$(sha256sum "${plugin_source}/index.js" "${plugin_source}/openclaw.plugin.json" | sha256sum | awk '{print $1}')"
+    current="$(cat "$marker" 2>/dev/null || true)"
+
+    if [ "$current" != "$expected" ]; then
+        printf '%s\n' '[openclaw] Installing managed personal GigaCode requester plugin'
+        # The source is copied into the immutable image, not downloaded at
+        # runtime. Capability acknowledgement is intentional: the plugin
+        # uses before_agent_run only to bind an already-authenticated sender
+        # to a short-lived local session record.
+        # In OpenClaw 2026.9.4 a bare local path is interpreted as a hook
+        # directory and therefore requires HOOK.md.  This is a native plugin
+        # package, so use the documented --link form to load its
+        # openclaw.plugin.json contract instead.
+        openclaw plugins install --link --force --accept-capabilities "$plugin_source"
+        install -d -m 0700 "$plugin_state_dir"
+        umask 077
+        printf '%s\n' "$expected" > "$marker"
+    fi
+}
+
 apply_autonomous_exec_approvals() {
     # The central tools.exec policy in init.mjs has a separate persisted
     # host-approval document. An autonomous profile must manage both layers:
@@ -111,7 +139,8 @@ wait_for_lmstudio() {
     return 1
 }
 
-if [ -n "${OPENCLAW_GATEWAY_TOKEN_FILE:-}" ]; then
+if ! is_enabled "${OPENCLAW_AUTHENTIK_TRUSTED_PROXY_ENABLED:-0}" \
+    && [ -n "${OPENCLAW_GATEWAY_TOKEN_FILE:-}" ]; then
     OPENCLAW_GATEWAY_TOKEN="$(cat "$OPENCLAW_GATEWAY_TOKEN_FILE")"
     export OPENCLAW_GATEWAY_TOKEN
 fi
@@ -121,8 +150,21 @@ if [ -n "${AGENTGATEWAY_TOKEN_FILE:-}" ]; then
     export AGENTGATEWAY_TOKEN
 fi
 
+# This internal bearer is specific to the local OpenClaw requester adapter.
+# It is never a GigaCode credential and gives no access to another
+# subscription by itself: the adapter also requires a short-lived identity
+# broker JWT tied to a session-to-subject mapping.  Load it only when the
+# personal feature is explicitly enabled, so generic installations neither
+# require nor persist this secret.
+if is_enabled "${OPENCLAW_GIGACODE_SUBSCRIPTION_ENABLED:-0}"; then
+    OPENCLAW_GIGACODE_ADAPTER_BEARER_FILE="${OPENCLAW_GIGACODE_ADAPTER_BEARER_FILE:?OPENCLAW_GIGACODE_ADAPTER_BEARER_FILE is required}"
+    OPENCLAW_GIGACODE_ADAPTER_BEARER="$(cat "$OPENCLAW_GIGACODE_ADAPTER_BEARER_FILE")"
+    export OPENCLAW_GIGACODE_ADAPTER_BEARER
+fi
+
 ensure_codex_plugin
 ensure_lancedb_plugin
+ensure_gigacode_requester_plugin
 
 printf '%s\n' '[openclaw] Merging managed local-provider configuration'
 node /opt/openclaw/init.mjs
