@@ -3,20 +3,21 @@
 # until an installation explicitly sets CODER_ENABLED=1.
 #
 # `ai-coder-control` is a Swarm overlay for Coder and its PostgreSQL database.
-# Workspace containers are *not* attached to this network: Terraform runs in
-# Coder's built-in provisioner against the dedicated rootless Docker daemon
-# mounted at /run/coder-rootless/docker.sock.  That daemon owns its own local
-# `ai-coder-workspaces` bridge and has no host Docker socket.
+# `ai-coder-docker-control` is an internal overlay whose only members are Coder
+# and its co-located docker-socket-proxy-coder.  Workspace containers are *not*
+# attached to either control network: Terraform runs in Coder's built-in
+# provisioner and reaches the host Docker daemon only through that restricted
+# socket proxy (DOCKER_HOST below), never through the raw Docker socket.
 
 services:
   coder-postgresql:
-    image: docker.io/library/postgres:18-alpine
+    image: ${CODER_POSTGRES_IMAGE:-docker.io/library/postgres:18.6-alpine}
     user: "10000:20000"
     environment:
       POSTGRES_DB: coder
       POSTGRES_PASSWORD_FILE: /run/secrets/ai-stand-coder-postgres-password
       POSTGRES_USER: coder
-      TZ: Europe/Moscow
+      TZ: "${IM_TZ:?IM_TZ is required}"
     secrets:
       - source: ai-stand-coder-postgres-password
         target: ai-stand-coder-postgres-password
@@ -25,7 +26,7 @@ services:
       # PostgreSQL 18 owns a version-specific data directory beneath this
       # mount.  Keep the mount at /var/lib/postgresql, not its old /data path.
       - type: bind
-        source: /mnt/storage/coder-data/postgres
+        source: ${STORAGE_ROOT:?STORAGE_ROOT is required}/coder-data/postgres
         target: /var/lib/postgresql
     networks:
       ai-coder-control:
@@ -62,13 +63,13 @@ services:
         order: stop-first
 
   coder:
-    image: ai-stand-coder:2.36.6-1
+    image: ${CODER_IMAGE:-ai-stand-coder:2.38.0-1}
     user: "10000:20000"
     command:
       - server
     environment:
       HOME: /home/coder
-      TZ: Europe/Moscow
+      TZ: "${IM_TZ:?IM_TZ is required}"
       # The native default binds 127.0.0.1:3000 inside the container.  Coder
       # is reached only through the host-published loopback-protected port
       # and Nginx, so listen on the service interface while keeping TLS at
@@ -94,13 +95,16 @@ services:
       CODER_OIDC_GROUP_FIELD: groups
       CODER_OIDC_ALLOWED_GROUPS: ai-users,ai-admins
       # Authentik emits the ai-stand-managed group names in the `groups`
-      # claim. Coder's native role sync retains `member` for users and grants
-      # site-owner capabilities only to ai-admins.
+      # claim. CODER_OIDC_ALLOWED_GROUPS (above) is the active gate. Role
+      # sync (USER_ROLE_*) is a licensed Coder feature, so on the Free edition
+      # it does nothing: everyone who signs in is a plain member, and the
+      # human owner is assigned explicitly (publisher.py bootstrap
+      # --verified-owner-user-id). The mapping is kept for a future licence.
       CODER_OIDC_USER_ROLE_FIELD: groups
       CODER_OIDC_USER_ROLE_MAPPING: '{"ai-users":["member"],"ai-admins":["owner"]}'
       # The Coder server owns built-in provisioners. They receive only the
-      # dedicated rootless Docker endpoint below, never /var/run/docker.sock.
-      DOCKER_HOST: unix:///run/coder-rootless/docker.sock
+      # restricted Docker socket proxy endpoint below, never /var/run/docker.sock.
+      DOCKER_HOST: tcp://docker-socket-proxy-coder:2375
     secrets:
       - source: ai-stand-coder-postgres-password
         target: ai-stand-coder-postgres-password
@@ -115,11 +119,8 @@ services:
     read_only: true
     volumes:
       - type: bind
-        source: /mnt/storage/coder-data/server
+        source: ${STORAGE_ROOT:?STORAGE_ROOT is required}/coder-data/server
         target: /home/coder
-      - type: bind
-        source: /mnt/storage/coder-data/provisioner/docker.sock
-        target: /run/coder-rootless/docker.sock
       # The short top-level `tmpfs:` key (used here until 2026-09-23) is
       # silently dropped by `docker stack deploy` - Swarm mode's Compose
       # support never materializes it into the service's actual mounts,
@@ -148,6 +149,7 @@ services:
       ai-coder-control:
         aliases:
           - coder
+      ai-coder-docker-control: {}
     stop_grace_period: 30s
     healthcheck:
       test:
@@ -170,7 +172,7 @@ services:
         parallelism: 1
         delay: 10s
         # Not rollback, unlike every other update_config in this repo.
-        # coder:2.36.6-1 is a purely local build with no registry prefix
+        # coder:2.38.0-1 is a purely local build with no registry prefix
         # (docker.io/library/ai-stand-coder implicitly) and no digest -
         # confirmed live 2026-09-23: any docker service update against this
         # service (not just docker stack deploy, which passes
@@ -196,10 +198,97 @@ services:
         monitor: 10m
         order: stop-first
 
+  # The Coder Terraform provisioner can create its managed workspace
+  # containers only through this private policy boundary.  Do not add the
+  # raw Docker socket to Coder or any workspace template.
+  docker-socket-proxy-coder:
+    image: ${DOCKER_SOCKET_PROXY_IMAGE:-ghcr.io/tecnativa/docker-socket-proxy:v0.5.0}
+    environment:
+      CONTAINERS: "1"
+      IMAGES: "1"
+      NETWORKS: "1"
+      VOLUMES: "1"
+      INFO: "1"
+      POST: "1"
+      ALLOW_START: "1"
+      ALLOW_STOP: "1"
+      AUTH: "0"
+      BUILD: "0"
+      COMMIT: "0"
+      CONFIGS: "0"
+      EXEC: "0"
+      NODES: "0"
+      PLUGINS: "0"
+      SECRETS: "0"
+      SERVICES: "0"
+      SWARM: "0"
+      SYSTEM: "0"
+      TASKS: "0"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+      - type: tmpfs
+        target: /var/lib/haproxy
+        tmpfs:
+          size: 1048576
+          mode: 0o755
+      # HAProxy 3.4 stores its master PID here. Without this narrow tmpfs,
+      # the pinned proxy exits on its read-only root filesystem.
+      - type: tmpfs
+        target: /run
+        tmpfs:
+          size: 1048576
+          mode: 0o755
+      # docker-socket-proxy writes its generated HAProxy config here at
+      # startup; this is the only writable runtime path besides server-state.
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 1048576
+          mode: 0o1777
+    networks:
+      ai-coder-docker-control:
+        aliases: [docker-socket-proxy-coder]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2375/_ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints: [node.labels.ai-stand.coder == true]
+      restart_policy: { condition: any, delay: 5s }
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 2m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 2m
+        order: stop-first
+
 networks:
   ai-coder-control:
     driver: overlay
     attachable: false
+    driver_opts:
+      encrypted: "true"
+  # The only members are Coder and its co-located Docker socket proxy.
+  ai-coder-docker-control:
+    driver: overlay
+    attachable: false
+    internal: true
     driver_opts:
       encrypted: "true"
 

@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { cleanupGitlabArtifacts } from "./cleanup-gitlab.mjs";
+import { cleanupMetamcpArtifacts } from "./cleanup-metamcp.mjs";
+
 const config = {
   baseUrl: env("AUTHENTIK_BASE_URL", "http://authentik:9000").replace(/\/+$/, ""),
   publicUrl: env("AUTHENTIK_PUBLIC_URL", "https://authentik.local").replace(/\/+$/, ""),
@@ -7,9 +10,10 @@ const config = {
   bootstrapUsername: env("AUTHENTIK_BOOTSTRAP_USERNAME", "akadmin"),
   openwebuiClientSecret: requiredEnv("AUTHENTIK_OPENWEBUI_CLIENT_SECRET"),
   portainerClientSecret: requiredEnv("AUTHENTIK_PORTAINER_CLIENT_SECRET"),
-  metamcpClientSecret: requiredEnv("AUTHENTIK_METAMCP_CLIENT_SECRET"),
   agentgatewayClientSecret: requiredEnv("AUTHENTIK_AGENTGATEWAY_CLIENT_SECRET"),
   coderClientSecret: requiredEnv("AUTHENTIK_CODER_CLIENT_SECRET"),
+  giteaEnabled: env("AUTHENTIK_GITEA_ENABLED", "false") === "true",
+  giteaClientSecret: env("AUTHENTIK_GITEA_CLIENT_SECRET", ""),
 };
 
 const groups = {
@@ -27,9 +31,9 @@ const hosts = {
   openwebui: env("AUTHENTIK_OPENWEBUI_URL", "https://openwebui.local").replace(/\/+$/, ""),
   openclaw: env("AUTHENTIK_OPENCLAW_URL", "https://openclaw.local").replace(/\/+$/, ""),
   portainer: env("AUTHENTIK_PORTAINER_URL", "https://portainer.local").replace(/\/+$/, ""),
-  metamcp: env("AUTHENTIK_METAMCP_URL", "https://metamcp.local").replace(/\/+$/, ""),
   agentgateway: env("AUTHENTIK_AGENTGATEWAY_URL", "https://agentgateway.local").replace(/\/+$/, ""),
   coder: env("AUTHENTIK_CODER_URL", "https://coder.local").replace(/\/+$/, ""),
+  gitea: env("AUTHENTIK_GITEA_URL", "https://gitea.local").replace(/\/+$/, ""),
 };
 
 // Vendored into docker/authentik/icons/ and served by nginx at
@@ -39,7 +43,7 @@ const hosts = {
 // that a couple of those "obvious" sources are actively wrong
 // (agentgateway's own /favicon.ico returns HTTP 200 with Content-Type:
 // image/vnd.microsoft.icon but the real bytes are SVG; GitHub's
-// openwebui/metamcp "vector" logos are real image/svg+xml but each just
+// openwebui "vector" logos are real image/svg+xml but each just
 // wraps a raster/diagram, not a usable icon) - vendoring means every icon
 // here was individually downloaded and verified byte-for-byte (`file`, not
 // just Content-Type) once, and Authentik's own app-list tiles no longer
@@ -48,13 +52,13 @@ const hosts = {
 const icons = {
   openwebui: `${config.publicUrl}/app-icons/openwebui.png`,
   portainer: `${config.publicUrl}/app-icons/portainer.svg`,
-  metamcp: `${config.publicUrl}/app-icons/metamcp.ico`,
   agentgateway: `${config.publicUrl}/app-icons/agentgateway.svg`,
   // The OAuth resource-server contract is Agentgateway itself, not a
   // separate product. Reuse its official mark instead of a look-alike tile.
   agentgatewayMcp: `${config.publicUrl}/app-icons/agentgateway.svg`,
   openclaw: `${config.publicUrl}/app-icons/openclaw.png`,
   coder: `${config.publicUrl}/app-icons/coder.svg`,
+  gitea: `${config.publicUrl}/app-icons/gitea.svg`,
 };
 
 function env(name, fallback) {
@@ -454,12 +458,12 @@ async function ensureFlowStageBinding(flowPk, stagePk, order) {
   log(`Flow stage binding created at order ${order}`);
 }
 
-// Lets each ai-users member edit their own readonly-mcp/GigaCode
+// Lets each ai-users member edit their own readonly-mcp
 // credentials (and, only where the installation opts in via
 // reconciler.json's userOverrides.upstreamsEnabled, their own upstream
 // endpoints) from the standard Authentik user-settings page (/if/user/),
-// instead of a separate secret store - this replaces an earlier Vault-based
-// design entirely. reconcile.py reads these same flat "ai_stand_mcp_*"
+// instead of a separate secret store. reconcile.py reads these same flat
+// "ai_stand_mcp_*"
 // attribute keys directly (see CREDENTIAL_ATTRIBUTES / UPSTREAM_OVERRIDE_
 // ATTRIBUTES there); keep both lists in sync by hand. Appended at high
 // binding orders (200+) onto default-user-settings-flow's *existing*
@@ -473,14 +477,17 @@ async function ensureFlowStageBinding(flowPk, stagePk, order) {
 // relying on it.
 async function ensureMcpSelfServiceAttributes(userSettingsFlowPk) {
   const fields = [
+    { key: "ai_stand_telegram_user_id", label: "Telegram user ID (numeric)", subText: "Your numeric Telegram ID, for example from @userinfobot (not your @username). It lets you talk to the OpenClaw bot; the change is applied within about ten minutes.", order: 5 },
     { key: "ai_stand_mcp_jira_pat", label: "Jira personal access token", subText: "Used only by your own jira-readonly-mcp container.", order: 10 },
     { key: "ai_stand_mcp_confluence_pat", label: "Confluence personal access token", subText: "Used only by your own confluence-readonly-mcp container.", order: 20 },
     { key: "ai_stand_mcp_imap_username", label: "IMAP username", subText: "Used only by your own imap-readonly-mcp container.", order: 30 },
     { key: "ai_stand_mcp_imap_password", label: "IMAP password", subText: "Used only by your own imap-readonly-mcp container.", order: 40 },
-    { key: "ai_stand_mcp_gigacode_device_id", label: "GigaCode Device ID", subText: "Used only by your own personal GigaCode subscription bridge.", order: 50 },
     { key: "ai_stand_mcp_jira_base_url", label: "Jira base URL (optional override)", subText: "Leave blank to use this installation's default. Only takes effect where the installation allows per-user upstream overrides.", order: 60 },
     { key: "ai_stand_mcp_confluence_base_url", label: "Confluence base URL (optional override)", subText: "Leave blank to use this installation's default. Only takes effect where the installation allows per-user upstream overrides.", order: 70 },
     { key: "ai_stand_mcp_imap_host", label: "IMAP host (optional override)", subText: "Leave blank to use this installation's default. Only takes effect where the installation allows per-user upstream overrides.", order: 80 },
+    { key: "ai_stand_git_ssh_public_key", label: "Personal Gitea SSH public key", type: "text_area", subText: "The matching public key (one line, for example the contents of id_ed25519.pub, ssh-ed25519 only). It is registered in your Gitea account within a minute; blank removes it.", order: 85 },
+    { key: "ai_stand_git_ssh_private_key", label: "Personal Gitea SSH private key", type: "text_area", subText: "For your Coder workspaces. It is not used to register the key in Gitea; never paste this key into a chat.", order: 90 },
+    { key: "ai_stand_git_ssh_passphrase", label: "SSH key passphrase (optional)", type: "password", subText: "Only required for an encrypted personal SSH private key.", order: 100 },
   ];
 
   const fieldPks = [];
@@ -488,7 +495,7 @@ async function ensureMcpSelfServiceAttributes(userSettingsFlowPk) {
     const prompt = await ensurePrompt(`attributes.${field.key}`, {
       name: field.key,
       label: field.label,
-      type: "text",
+      type: field.type ?? "text",
       required: false,
       placeholder: "",
       sub_text: field.subText,
@@ -502,7 +509,7 @@ async function ensureMcpSelfServiceAttributes(userSettingsFlowPk) {
   await ensureFlowStageBinding(userSettingsFlowPk, promptStage.pk, 200);
   await ensureFlowStageBinding(userSettingsFlowPk, writeStage.pk, 201);
 
-  log("Self-service readonly-mcp/GigaCode attribute stage ensured on the user-settings flow");
+  log("Self-service readonly-mcp attribute stage ensured on the user-settings flow");
 }
 
 async function getApplication(slug) {
@@ -572,7 +579,9 @@ async function ensureEmbeddedOutpost(proxyProviderIds) {
   };
 
   await api("PATCH", `/outposts/instances/${embedded.pk}/`, {
-    providers: proxyProviderIds,
+    // Additive: a generic configure-authentik must not silently detach
+    // providers that are already attached to the embedded outpost.
+    providers: [...new Set([...(embedded.providers ?? []), ...proxyProviderIds])],
     config: outpostConfig,
   });
   log(`Embedded outpost ensured: ${embedded.name}; authentik_host=${config.publicUrl}`);
@@ -603,15 +612,6 @@ async function cleanupStaleProxyArtifacts() {
   const stale = [
     ["openwebui-proxy", "ai-stand-openwebui-proxy"],
     ["portainer-proxy", "ai-stand-portainer-proxy"],
-    // lmstudio has no viable external-auth story upstream (LM Studio has no
-    // "Require Authentication" support at all - lmstudio-ai/lmstudio-bug-
-    // tracker#1674), so this Authentik Application/Provider pair is
-    // intentionally never (re)created here - both the original
-    // direct-lmstudio application and the newer lmstudio-compat-proxy (for
-    // the Node normalizing proxy) are unused and were confusingly
-    // similarly named; removed rather than kept around inert or renamed.
-    ["lmstudio-proxy", "ai-stand-lmstudio-proxy"],
-    ["lmstudio-compat-proxy", "ai-stand-lmstudio-compat-proxy"],
   ];
 
   for (const [slug] of stale) {
@@ -626,30 +626,6 @@ async function cleanupStaleProxyArtifacts() {
   // application-only rename, not a proxy-provider pair, so it doesn't fit
   // the `stale` array shape above.
   await deleteApplicationIfExists("portainer-oidc");
-}
-
-async function deleteOAuth2ProviderIfExists(name) {
-  const matches = await list("/providers/oauth2/", { search: name });
-  const existing = matches.find((provider) => provider.name === name);
-  if (!existing?.pk) {
-    log(`Stale OIDC provider absent: ${name}`);
-    return;
-  }
-  await api("DELETE", `/providers/oauth2/${existing.pk}/`);
-  log(`Stale OIDC provider deleted: ${name}`);
-}
-
-// Vault was removed entirely from ai-stand (readonly-mcp/GigaCode
-// credentials moved to Authentik user attributes - see
-// ensureMcpSelfServiceAttributes above). Its Application used a native OIDC
-// provider, not a Proxy provider, so it needs its own delete path rather
-// than fitting cleanupStaleProxyArtifacts()'s stale array shape. An
-// Application referencing a deleted provider is left orphaned by Authentik's
-// API (provider is nullable), so delete the Application first, same order
-// as the proxy cleanup above.
-async function cleanupRetiredVaultArtifacts() {
-  await deleteApplicationIfExists("vault-ai-stand");
-  await deleteOAuth2ProviderIfExists("ai-stand-vault-oidc");
 }
 
 async function verifyOpenWebuiDiscovery() {
@@ -686,23 +662,6 @@ async function verifyPortainerDiscovery() {
   log(`Portainer OIDC discovery is available with ${jwks.keys.length} JWKS key(s)`);
 }
 
-async function verifyMetamcpDiscovery() {
-  const response = await rawFetch("/application/o/metamcp/.well-known/openid-configuration");
-  if (!response.ok) {
-    throw new Error(`MetaMCP OIDC discovery failed with HTTP ${response.status}`);
-  }
-  const discovery = await response.json();
-  const jwksResponse = await rawFetch(discovery.jwks_uri);
-  if (!jwksResponse.ok) {
-    throw new Error(`MetaMCP OIDC JWKS failed with HTTP ${jwksResponse.status}`);
-  }
-  const jwks = await jwksResponse.json();
-  if (!Array.isArray(jwks.keys) || jwks.keys.length === 0) {
-    throw new Error("MetaMCP OIDC JWKS does not contain signing keys");
-  }
-  log(`MetaMCP OIDC discovery is available with ${jwks.keys.length} JWKS key(s)`);
-}
-
 async function verifyAgentgatewayDiscovery() {
   const response = await rawFetch("/application/o/agentgateway/.well-known/openid-configuration");
   if (!response.ok) {
@@ -724,11 +683,11 @@ async function verifyApplicationIcons() {
   const expectedIcons = {
     openwebui: icons.openwebui,
     portainer: icons.portainer,
-    metamcp: icons.metamcp,
     agentgateway: icons.agentgateway,
     "agentgateway-mcp": icons.agentgatewayMcp,
     openclaw: icons.openclaw,
     coder: icons.coder,
+    gitea: icons.gitea,
   };
 
   // meta_icon is set as a normal field on the application (see
@@ -784,7 +743,7 @@ async function main() {
     property_mappings: propertyMappings,
     signing_key: signingKey,
     // Fixed 2026-09-13: this provider (and portainer's below) predates the
-    // grant_types gotcha documented on metamcpProvider below, and on THIS
+    // grant_types gotcha documented on agentgatewayProvider below, and on THIS
     // installation already has a working grant_types from whenever it was
     // first created - PATCH-only updates mean re-running this script alone
     // was never going to add the field retroactively. That made the
@@ -804,10 +763,10 @@ async function main() {
       },
     ],
     include_claims_in_id_token: true,
-    // Personal MCP/GigaCode routes are selected solely by immutable
+    // Personal MCP routes are selected solely by immutable
     // Authentik subject. Open WebUI merges existing accounts by verified
-    // email, so this migration preserves user records while allowing its
-    // managed Pipe to obtain the same subject as Agentgateway MCP.
+    // email, so this migration preserves user records while allowing it
+    // to obtain the same subject as Agentgateway MCP.
     sub_mode: "user_uuid",
     issuer_mode: "per_provider",
   });
@@ -834,8 +793,8 @@ async function main() {
     issuer_mode: "per_provider",
   });
 
-  const metamcpProvider = await ensureOAuthProvider("ai-stand-metamcp-oidc", {
-    name: "ai-stand-metamcp-oidc",
+  const agentgatewayProvider = await ensureOAuthProvider("ai-stand-agentgateway-oidc", {
+    name: "ai-stand-agentgateway-oidc",
     authorization_flow: flows.authorization,
     invalidation_flow: flows.invalidation,
     property_mappings: propertyMappings,
@@ -843,36 +802,10 @@ async function main() {
     // A brand-new provider (POST) does NOT default grant_types to a usable
     // set - it's left as [], silently rejecting every authorization
     // request with "invalid_request: The request is otherwise malformed".
-    // Confirmed live 2026-09-05 by diffing this provider's saved API
-    // representation against portainer's (which, unlike this one, already
-    // had a working value from however it was first created - see the
-    // fix on openwebuiProvider above for why that reasoning doesn't
-    // generalize to a fresh install).
-    grant_types: ["authorization_code", "refresh_token"],
-    client_type: "confidential",
-    client_id: "metamcp",
-    client_secret: config.metamcpClientSecret,
-    redirect_uris: [
-      {
-        // Better Auth's generic-oauth plugin builds this from
-        // OIDC_PROVIDER_ID (compose.yaml, must be "oidc" - see the
-        // comment there for why).
-        matching_mode: "strict",
-        url: `${hosts.metamcp}/api/auth/oauth2/callback/oidc`,
-      },
-    ],
-    include_claims_in_id_token: true,
-    sub_mode: "user_email",
-    issuer_mode: "per_provider",
-  });
-
-  const agentgatewayProvider = await ensureOAuthProvider("ai-stand-agentgateway-oidc", {
-    name: "ai-stand-agentgateway-oidc",
-    authorization_flow: flows.authorization,
-    invalidation_flow: flows.invalidation,
-    property_mappings: propertyMappings,
-    signing_key: signingKey,
-    // Same brand-new-provider gotcha as metamcpProvider above.
+    // Confirmed live 2026-09-05 by diffing a new provider's saved API
+    // representation against portainer's (which already had a working value
+    // from however it was first created - see the fix on openwebuiProvider
+    // above for why that reasoning doesn't generalize to a fresh install).
     grant_types: ["authorization_code", "refresh_token"],
     client_type: "confidential",
     client_id: "agentgateway",
@@ -995,29 +928,13 @@ async function main() {
   });
   await bindApplicationGroups(portainerApp, [adminGroup]);
 
-  // MetaMCP remains the self-service namespace/endpoint management UI. Its
-  // public native registration routes stay blocked by nginx; authorised
-  // ai-users and ai-admins sign in through Authentik instead.
-  const metamcpApp = await ensureApplication("metamcp", {
-    name: "MetaMCP",
-    provider: metamcpProvider.pk,
-    backchannel_providers: [],
-    meta_launch_url: hosts.metamcp,
-    meta_icon: icons.metamcp,
-    meta_description: "ai-stand MetaMCP OIDC application (personal MCP management)",
-    meta_publisher: "ai-stand",
-    open_in_new_tab: false,
-    policy_engine_mode: "any",
-  });
-  await bindApplicationGroups(metamcpApp, [userGroup, adminGroup]);
-
   // Admin-only: the only thing a human ever reaches via OIDC on
   // agentgateway is its read-only admin/observability console (ui: in
   // config.yaml) - not a chat UI, not something every ai-users member has
   // a reason to open. ai-users' actual model access is transitive, through
   // OpenWebUI's own already-gated login (OpenWebUI then calls
   // agentgateway's LLM surface with its own service token, never a human's
-  // OIDC session) - same reasoning as Portainer/MetaMCP above.
+  // OIDC session) - same reasoning as Portainer above.
   const agentgatewayApp = await ensureApplication("agentgateway", {
     name: "agentgateway",
     provider: agentgatewayProvider.pk,
@@ -1048,6 +965,44 @@ async function main() {
   });
   await bindApplicationGroups(agentgatewayMcpApp, [userGroup, adminGroup]);
 
+  // LLM API access for people and command-line clients (OpenCode, scripts).
+  // Every ai-users member mints their own token without any administrative
+  // right: create an App password under Authentik user settings ("Tokens and
+  // App passwords"), then exchange it at this provider's token endpoint with
+  // grant_type=client_credentials (username + that App password). The signed
+  // JWT is the Bearer token Agentgateway verifies on its LLM routes
+  // (llm.policies.jwtAuth), and its email claim is who the usage is accounted
+  // to. The token is self-contained, so deleting the App password does not
+  // revoke one already issued: keep the validity short.
+  const llmProvider = await ensureOAuthProvider("ai-stand-llm", {
+    name: "ai-stand-llm",
+    authorization_flow: flows.authorization,
+    invalidation_flow: flows.invalidation,
+    property_mappings: propertyMappings,
+    signing_key: signingKey,
+    grant_types: ["client_credentials"],
+    client_type: "public",
+    client_id: "ai-stand-llm",
+    redirect_uris: [],
+    access_token_validity: "days=30",
+    include_claims_in_id_token: true,
+    sub_mode: "user_uuid",
+    issuer_mode: "per_provider",
+  });
+  // blank://blank keeps this token endpoint out of the users' application
+  // library: it is not something to open in a browser.
+  const llmApp = await ensureApplication("ai-stand-llm", {
+    name: "ai-stand LLM access",
+    provider: llmProvider.pk,
+    backchannel_providers: [],
+    meta_launch_url: "blank://blank",
+    meta_description: "Token endpoint for LLM API clients (App password to JWT)",
+    meta_publisher: "ai-stand",
+    open_in_new_tab: false,
+    policy_engine_mode: "any",
+  });
+  await bindApplicationGroups(llmApp, [userGroup, adminGroup]);
+
   const openclawApp = await ensureApplication("openclaw", {
     name: "OpenClaw",
     provider: openclawProxyProvider.pk,
@@ -1074,18 +1029,60 @@ async function main() {
   });
   await bindApplicationGroups(coderApp, [userGroup, adminGroup]);
 
+  if (config.giteaEnabled) {
+    if (!config.giteaClientSecret) {
+      throw new Error("AUTHENTIK_GITEA_CLIENT_SECRET is required when Gitea is enabled");
+    }
+
+    const giteaProvider = await ensureOAuthProvider("ai-stand-gitea-oidc", {
+      name: "ai-stand-gitea-oidc",
+      authorization_flow: flows.authorization,
+      invalidation_flow: flows.invalidation,
+      property_mappings: propertyMappings,
+      signing_key: signingKey,
+      grant_types: ["authorization_code", "refresh_token"],
+      client_type: "confidential",
+      client_id: "gitea",
+      client_secret: config.giteaClientSecret,
+      redirect_uris: [
+        {
+          matching_mode: "strict",
+          url: `${hosts.gitea}/user/oauth2/authentik/callback`,
+        },
+      ],
+      include_claims_in_id_token: true,
+      // Gitea must retain the immutable subject: email and username can be
+      // edited by the person, whereas `sub` drives all external identity.
+      sub_mode: "user_uuid",
+      issuer_mode: "per_provider",
+    });
+
+    const giteaApp = await ensureApplication("gitea", {
+      name: "Gitea",
+      provider: giteaProvider.pk,
+      backchannel_providers: [],
+      meta_launch_url: hosts.gitea,
+      meta_icon: icons.gitea,
+      meta_description: "ai-stand Gitea OIDC application",
+      meta_publisher: "ai-stand",
+      open_in_new_tab: false,
+      policy_engine_mode: "any",
+    });
+    await bindApplicationGroups(giteaApp, [userGroup, adminGroup]);
+  }
+
   const userSettingsFlowPk = await getFlowBySlug("default-user-settings-flow");
   await ensureMcpSelfServiceAttributes(userSettingsFlowPk);
 
   // The embedded outpost answers only OpenClaw forward-auth subrequests;
   // Nginx remains the sole OpenClaw application reverse proxy.
   await ensureEmbeddedOutpost([openclawProxyProvider.pk]);
+  await cleanupGitlabArtifacts({ api, list, log });
+  await cleanupMetamcpArtifacts({ api, list, log });
   await cleanupStaleProxyArtifacts();
-  await cleanupRetiredVaultArtifacts();
   await verifyApplicationIcons();
   await verifyOpenWebuiDiscovery();
   await verifyPortainerDiscovery();
-  await verifyMetamcpDiscovery();
   await verifyAgentgatewayDiscovery();
 
   log(`Authentik ai-stand configuration complete at ${config.publicUrl}`);

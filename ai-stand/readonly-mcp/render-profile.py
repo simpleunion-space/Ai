@@ -18,13 +18,15 @@ from urllib.parse import urlparse
 
 SAFE = re.compile(r"^[a-z][a-z0-9-]{0,48}$")
 SUBJECT = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
-SECRET = re.compile(r"^ai-stand-(?:mcp|gigacode)-[a-z0-9-]{3,100}$")
+SECRET = re.compile(r"^ai-stand-mcp-[a-z0-9-]{3,100}$")
 HOST = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 KINDS = ("jira", "confluence", "imap")
-GIGACODE_KIND = "gigacode"
 MCP_PATH_PREFIX = re.compile(r"^/mcp/[a-z][a-z0-9-]{0,62}$")
 # Docker's 63-character limit applies after the `ai-stand_` stack prefix.
-# 63 - len("ai-stand_") - len("gigacode-subscription-bridge-") = 25.
+# The slug is "u-" plus 23 hash characters (25), which fits even behind the
+# longest service prefix: 9 + len("confluence-readonly-mcp-") + 25 = 58.
+# The length is deliberately unchanged so existing service and Docker Secret
+# names stay stable.
 MAX_SUBJECT_SLUG_LENGTH = 25
 
 
@@ -45,18 +47,9 @@ def https_url(value: object, field: str) -> str:
     return value.rstrip("/")
 
 
-def internal_url(value: object, field: str) -> str:
-    if not isinstance(value, str):
-        fail(f"{field} must be a string")
-    parsed = urlparse(value)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password or parsed.fragment:
-        fail(f"{field} must be an absolute HTTP(S) URL without credentials or fragment")
-    return value.rstrip("/")
-
-
 def secret_name(value: object, field: str) -> str:
     if not isinstance(value, str) or not SECRET.fullmatch(value):
-        fail(f"{field} must be an ai-stand-mcp-* or ai-stand-gigacode-* Docker Secret name")
+        fail(f"{field} must be an ai-stand-mcp-* Docker Secret name")
     return value
 
 
@@ -116,35 +109,11 @@ def load_manifest(path: Path) -> list[dict]:
                 "secretVersion": version,
             }
 
-        gigacode = raw_services.get(GIGACODE_KIND)
-        if gigacode is not None:
-            if not isinstance(gigacode, dict):
-                fail(f"users[{index}].services.gigacode must be an object")
-            version = gigacode.get("secretVersion")
-            if not isinstance(version, int) or version < 1:
-                fail(f"users[{index}].services.gigacode.secretVersion must be a positive integer")
-            services[GIGACODE_KIND] = {
-                "deviceIdSecret": secret_name(gigacode.get("deviceIdSecret"), f"users[{index}].services.gigacode.deviceIdSecret"),
-                "internalTokenSecret": secret_name(gigacode.get("internalTokenSecret"), f"users[{index}].services.gigacode.internalTokenSecret"),
-                "secretVersion": version,
-            }
-
-        personal = entry.get("metamcp")
-        normalized_personal = None
-        if personal is not None:
-            if not isinstance(personal, dict):
-                fail(f"users[{index}].metamcp must be an object when present")
-            normalized_personal = {
-                "endpointUrl": internal_url(personal.get("endpointUrl"), f"users[{index}].metamcp.endpointUrl"),
-                "backendKeySecret": secret_name(personal.get("backendKeySecret"), f"users[{index}].metamcp.backendKeySecret"),
-            }
-        users.append({"subject": subject.lower(), "slug": slug, "services": services, "metamcp": normalized_personal})
+        users.append({"subject": subject.lower(), "slug": slug, "services": services})
     return users
 
 
 def service_name(kind: str, slug: str) -> str:
-    if kind == GIGACODE_KIND:
-        return f"gigacode-subscription-bridge-{slug}"
     return f"{kind}-readonly-mcp-{slug}"
 
 
@@ -164,60 +133,6 @@ def render_compose(
     for user, kind, config in active_services:
         name = service_name(kind, user["slug"])
         internal_token_secret = config["internalTokenSecret"]
-        if kind == GIGACODE_KIND:
-            device_id_secret = config["deviceIdSecret"]
-            declared_secrets.update((device_id_secret, internal_token_secret))
-            lines.extend([
-                f"  {name}:",
-                f"    image: {images[GIGACODE_KIND]}",
-                '    user: "10000:20000"',
-                "    read_only: true",
-                "    cap_drop:",
-                "      - ALL",
-                "    security_opt:",
-                "      - no-new-privileges:true",
-                "    environment:",
-                "      ASPNETCORE_URLS: http://+:8080",
-                "      GIGACODE_BASE_URL: https://gigacode.ru",
-                "      GIGACODE_AUTH_PATH: /api/v2/auth/plugin",
-                "      GIGACODE_CONFIG_PATH: /api/v2/config",
-                "      GIGACODE_FALLBACK_CHAT_PATH: /api/v2/chat/completions",
-                "      GIGACODE_FALLBACK_MODEL: CodeChat",
-                "      GIGACODE_LOCALE: ru",
-                "      GIGACODE_LOGIN: node",
-                "      GIGACODE_MODEL_ALIAS: gigacode/codechat",
-                "      GIGACODE_PLUGIN_NAME: cli-plugin",
-                "      GIGACODE_PLUGIN_VERSION: \"26.7.33\"",
-                "      GIGACODE_CONTEXT_WINDOW: \"65536\"",
-                "      GIGACODE_MAX_CONCURRENT_REQUESTS: \"2\"",
-                "      GIGACODE_MAX_QUEUED_REQUESTS: \"10\"",
-                "      GIGACODE_REQUEST_TIMEOUT_SECONDS: \"86400\"",
-                "      GIGACODE_STREAM_IDLE_TIMEOUT_SECONDS: \"86400\"",
-                "      GIGACODE_TOKEN_REFRESH_SKEW_SECONDS: \"60\"",
-                f"      GIGACODE_DEVICE_ID_FILE: /run/secrets/{device_id_secret}",
-                f"      GIGACODE_INTERNAL_BEARER_FILE: /run/secrets/{internal_token_secret}",
-                "    secrets:",
-                f"      - source: {device_id_secret}",
-                f"        target: {device_id_secret}",
-                "        mode: 0444",
-                f"      - source: {internal_token_secret}",
-                f"        target: {internal_token_secret}",
-                "        mode: 0444",
-                "    networks:",
-                "      ai-models-backend:",
-                f"        aliases: [{name}]",
-                "    deploy:",
-                "      mode: replicated",
-                "      replicas: 1",
-                "      placement:",
-                "        constraints:",
-                "          - node.labels.ai-stand.agentgateway == true",
-                "      restart_policy:",
-                "        condition: any",
-                "        delay: 10s",
-            ])
-            continue
-
         credential_secret = config["credentialSecret"]
         declared_secrets.update((credential_secret, internal_token_secret))
         prefix = kind.upper()
@@ -279,9 +194,6 @@ def render_compose(
     # then atomically reloads the rendered route configuration.  External
     # PAT/IMAP credentials remain mounted solely into their owning MCP
     # container.
-    for user in users:
-        if user["metamcp"]:
-            declared_secrets.add(user["metamcp"]["backendKeySecret"])
     if declared_secrets:
         lines.append("secrets:")
         for secret in sorted(declared_secrets):
@@ -294,28 +206,14 @@ def render_compose(
         "  ai-mcp-backend:",
         "    external: true",
         "    name: ai-stand_ai-mcp-backend",
-        "  ai-models-backend:",
-        "    external: true",
-        "    name: ai-stand_ai-models-backend",
     ])
     return "\n".join(lines) + "\n"
 
 
 def target(kind: str, user: dict) -> tuple[str, str, str] | None:
-    if kind == "personal":
-        personal = user["metamcp"]
-        if not personal:
-            return None
-        return f"personal-{user['slug']}", personal["endpointUrl"], personal["backendKeySecret"]
     config = user["services"].get(kind)
     if not config:
         return None
-    if kind == GIGACODE_KIND:
-        return (
-            f"gigacode-{user['slug']}",
-            f"http://{service_name(kind, user['slug'])}:8080",
-            config["internalTokenSecret"],
-        )
     return (
         f"{kind}-{user['slug']}",
         f"http://{service_name(kind, user['slug'])}:8080/mcp",
@@ -339,7 +237,6 @@ def render_agentgateway(
         "jira": f"{mcp_path_prefix}/jira-readonly-mcp",
         "confluence": f"{mcp_path_prefix}/confluence-readonly-mcp",
         "imap": f"{mcp_path_prefix}/imap-readonly-mcp",
-        "personal": "/mcp/personal",
     }
     routes: list[str] = []
     for kind, path in paths.items():
@@ -416,52 +313,6 @@ def render_agentgateway(
             ])
         routes.extend(lines)
 
-    # GigaCode is an OpenAI-compatible inference backend rather than an MCP
-    # server.  Every subscribed Authentik subject therefore receives its own
-    # opaque internal route.  The route accepts only a short-lived broker JWT
-    # whose sub is equal to the route owner; generic OpenAI machine tokens
-    # cannot reach this path or select another user's bridge.
-    for user in users:
-        resolved = target(GIGACODE_KIND, user)
-        if resolved is None:
-            continue
-        _, host, token = resolved
-        subject = user["subject"]
-        # The OpenClaw provider may use either OpenAI Chat Completions or
-        # Responses.  They need separate routes because Agentgateway's path
-        # rewrite is intentionally exact.  Both routes have the identical
-        # subject/caller check and the same private backend bearer.
-        for api_path, upstream_path in (("chat/completions", "/v1/chat/completions"), ("responses", "/v1/responses")):
-            path = f"/_internal/gigacode/{user['slug']}/{api_path}"
-            route_name = api_path.replace("/", "-")
-            routes.extend([
-                f"  - name: gigacode-{user['slug']}-{route_name}",
-                "    gateways: [default]",
-                "    matches:",
-                "      - path:",
-                f"          pathPrefix: {path}",
-                "    policies:",
-                "      jwtAuth:",
-                "        mode: strict",
-                "        issuer: ai-stand-gigacode-identity-broker",
-                "        audiences: [ai-stand-gigacode]",
-                "        jwks:",
-                "          file: /run/secrets/ai-stand-gigacode-broker-public-jwks-v2",
-                "      authorization:",
-                "        rules:",
-                f"          - allow: {quoted(f'jwt.sub == \"{subject}\" && (jwt.caller == \"openwebui\" || jwt.caller == \"openclaw\")')}",
-                "      urlRewrite:",
-                "        path:",
-                f"          full: {upstream_path}",
-                "    backends:",
-                f"      - host: {host.removeprefix('http://')}",
-                "        policies:",
-                "          backendAuth:",
-                "            key:",
-                "              value:",
-                f"                file: /run/secrets/{token}",
-            ])
-
     return base.replace(marker, "routes: []" if not routes else "routes:\n" + "\n".join(routes))
 
 
@@ -484,7 +335,6 @@ def main() -> None:
     parser.add_argument("--jira-image", required=True)
     parser.add_argument("--confluence-image", required=True)
     parser.add_argument("--imap-image", required=True)
-    parser.add_argument("--gigacode-image", required=True)
     args = parser.parse_args()
 
     users = load_manifest(args.manifest)
@@ -524,7 +374,6 @@ def main() -> None:
                 "jira": args.jira_image,
                 "confluence": args.confluence_image,
                 "imap": args.imap_image,
-                GIGACODE_KIND: args.gigacode_image,
             },
             gateway_url,
             upstreams,

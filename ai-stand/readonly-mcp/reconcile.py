@@ -9,16 +9,16 @@ subjects, stable service names and Docker Secret names/versions.
 Credentials live only in each user's own Authentik profile attributes
 (edited by the user through a self-service prompt stage - see configure.mjs),
 never in this repository, the manifest, or any rendered Compose/configuration
-file. This deliberately replaces an earlier Vault-backed design: Vault added
-an entire extra service, OIDC role and AppRole bootstrap for what is, in a
-single-installation deployment, one more piece of state on an identity the
-reconciler already has to trust and call.
+file. Credentials are deliberately kept in the authenticated user's profile
+attributes: the reconciler already has to trust that identity control plane,
+so adding a second secret store would only widen the operational boundary.
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
+import calendar
 import contextlib
 import fcntl
 import hashlib
@@ -43,15 +43,22 @@ from typing import Any
 
 SUBJECT = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 SAFE_SLUG = re.compile(r"^[a-z][a-z0-9-]{0,48}$")
-SECRET_NAME = re.compile(r"^ai-stand-(?:mcp|gigacode)-[a-z0-9-]{3,100}$")
+SECRET_NAME = re.compile(r"^ai-stand-mcp-[a-z0-9-]{3,100}$")
 MCP_KINDS = ("jira", "confluence", "imap")
-# GigaCode is deliberately reconciled next to the read-only integrations:
-# both are personal external subscriptions selected from the immutable
-# Authentik subject.  It is *not* an MCP server, so no GigaCode value is
-# ever exposed on the MCP data plane.
-GIGACODE_KIND = "gigacode"
-SERVICE_KINDS = MCP_KINDS + (GIGACODE_KIND,)
-DEVICE_ID = re.compile(r"^[0-9a-f]{64}$", re.I)
+# Telegram user ids of the people allowed to talk to the OpenClaw bot (OPENCLAW_TELEGRAM_ALLOW_FROM). Numeric ids of
+# people only: a @username can be taken over, a group id is negative.
+TELEGRAM_ATTRIBUTE = "ai_stand_telegram_user_id"
+TELEGRAM_ID = re.compile(r"^[1-9][0-9]{4,14}$")
+# The Telegram groups of the OpenClaw bot live in the attributes of one account, the Telegram owner (akadmin unless
+# authentik.telegramOwner says otherwise): that account's own ai_stand_telegram_user_id is the bot's owner, and
+# ai_stand_telegram_groups lists the groups, an object {"<group id>": {"requireMention": true, "topics": {"<topic id>":
+# "<agent id>"}}}. The people allowed to write in them are the ordinary ai_stand_telegram_user_id of the ai-users members.
+TELEGRAM_GROUPS_ATTRIBUTE = "ai_stand_telegram_groups"
+TELEGRAM_GROUP_ID = re.compile(r"^-[1-9][0-9]{4,19}$")
+TELEGRAM_TOPIC_ID = re.compile(r"^(?:[1-9][0-9]{0,9}|\*)$")
+TELEGRAM_AGENT_ID = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+TELEGRAM_MAX_GROUPS = 20
+TELEGRAM_MAX_TOPICS = 64
 # Which flat Authentik user-attribute keys make up one kind's credential, and
 # which of credential_record()'s field names each one fills. A record is
 # "complete" only once every one of these attributes is a non-empty string;
@@ -65,7 +72,6 @@ CREDENTIAL_ATTRIBUTES: dict[str, dict[str, str]] = {
         "ai_stand_mcp_imap_username": "username",
         "ai_stand_mcp_imap_password": "password",
     },
-    GIGACODE_KIND: {"ai_stand_mcp_gigacode_device_id": "device_id"},
 }
 # Installation-scoped opt-in (Settings.allow_user_upstream_overrides): which
 # attribute overrides which of this installation's upstream Settings fields.
@@ -141,19 +147,19 @@ class Settings:
     authentik_address: str
     authentik_api_token_file: Path
     authentik_group: str
+    telegram_owner_username: str
     jira_base_url: str
     confluence_base_url: str
     imap_host: str
     imap_port: int
     imap_tls_mode: str
     upstream_ca_file: Path | None
-    metamcp_enabled: bool
     # Installation-scoped opt-in, off by default: lets a member of
     # authentik_group override this installation's own upstream endpoints
     # for their personal services via UPSTREAM_OVERRIDE_ATTRIBUTES. The
     # generic core ships this off; a single-user installation may judge the
     # reduced blast radius (a user can only ever redirect their own
-    # already-isolated MCP/GigaCode container) an acceptable trade for
+    # already-isolated MCP container) an acceptable trade for
     # letting them self-serve the endpoint too, not just the credential.
     allow_user_upstream_overrides: bool
 
@@ -187,13 +193,13 @@ class Settings:
             authentik_address=https_url(authentik.get("address"), "authentik.address"),
             authentik_api_token_file=Path(require_string(authentik.get("apiTokenFile"), "authentik.apiTokenFile")),
             authentik_group=require_string(authentik.get("aiUsersGroup", "ai-users"), "authentik.aiUsersGroup", 128),
+            telegram_owner_username=require_string(authentik.get("telegramOwner", "akadmin"), "authentik.telegramOwner", 150),
             jira_base_url=https_url(upstreams.get("jiraBaseUrl"), "upstreams.jiraBaseUrl"),
             confluence_base_url=https_url(upstreams.get("confluenceBaseUrl"), "upstreams.confluenceBaseUrl"),
             imap_host=imap_host,
             imap_port=positive_port(upstreams.get("imapPort", 993), "upstreams.imapPort"),
             imap_tls_mode=tls_mode,
             upstream_ca_file=Path(upstreams["caFile"]) if upstreams.get("caFile") else None,
-            metamcp_enabled=bool(require_object(root.get("metamcp", {}), "metamcp").get("enabled", False)),
             allow_user_upstream_overrides=bool(
                 require_object(root.get("userOverrides", {}), "userOverrides").get("upstreamsEnabled", False)
             ),
@@ -299,16 +305,103 @@ class Authentik:
             users.append(user)
         return users
 
+    def telegram_owner(self) -> dict[str, Any] | None:
+        """The active superuser account that owns the Telegram bot, or None. Looked up by exact username, not through
+        ai-users: the owner needs no MCP credentials and may be outside the group. A non-superuser never qualifies, so
+        renaming an ordinary account to the owner's name cannot hand it the bot."""
+        name = self.settings.telegram_owner_username
+        for user in self._list(f"/core/users/?username={urllib.parse.quote(name)}"):
+            if user.get("username") == name and user.get("is_active") is True and user.get("is_superuser") is True:
+                return user
+        return None
+
     def write_status(self, user: dict[str, Any], status: dict[str, Any]) -> None:
         pk = user.get("pk")
         if pk is None:
             raise fail("Authentik user has no primary key")
-        attributes = user.get("attributes")
+        path = f"/core/users/{urllib.parse.quote(str(pk))}/"
+        # `user` is a snapshot from the start of the run, and a run can take minutes (every probe of an unreachable
+        # upstream waits up to 30 s). Authentik's PATCH replaces the whole attributes object, so writing that snapshot
+        # back would silently undo whatever the person or an operator saved in the meantime. Read the user again right
+        # before writing and change nothing but our own status key.
+        current = require_object(self._api(path), "Authentik user")
+        attributes = current.get("attributes")
         if attributes is None:
             attributes = {}
         attributes = dict(require_object(attributes, "Authentik user attributes"))
+        if status_unchanged(attributes.get("ai_stand_mcp"), status):
+            return
         attributes["ai_stand_mcp"] = status
-        self._api(f"/core/users/{urllib.parse.quote(str(pk))}/", method="PATCH", payload={"attributes": attributes})
+        self._api(path, method="PATCH", payload={"attributes": attributes})
+
+
+def status_unchanged(current: Any, new: dict[str, Any], max_age: int = 3600) -> bool:
+    """True when rewriting the status would change nothing but its timestamp, and the timestamp is still recent.
+
+    Skipping those writes keeps the reconciler from touching every profile every five minutes, which is what
+    made lost updates possible in the first place."""
+    if not isinstance(current, dict):
+        return False
+    strip = lambda value: {key: item for key, item in value.items() if key != "checkedAt"}
+    if strip(current) != strip(new):
+        return False
+    try:
+        age = time.time() - calendar.timegm(time.strptime(str(current["checkedAt"]), "%Y-%m-%dT%H:%M:%SZ"))
+    except (KeyError, ValueError, OverflowError):
+        return False
+    return 0 <= age < max_age
+
+
+def telegram_groups(user: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str]:
+    """The Telegram groups from the owner's attribute: (groups, state) with state active, missing or invalid. The value is
+    an object, or the same object as a JSON string (Authentik's attribute editor keeps either). Anything outside the
+    schema makes the whole attribute invalid: a half-read list could silently drop a group, so nothing is pushed then and
+    the gateway keeps what it has. An empty object is valid and means "no groups"."""
+    attributes = user.get("attributes") if isinstance(user, dict) else None
+    value = attributes.get(TELEGRAM_GROUPS_ATTRIBUTE) if isinstance(attributes, dict) else None
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None, "missing"
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None, "invalid"
+    if not isinstance(value, dict) or len(value) > TELEGRAM_MAX_GROUPS:
+        return None, "invalid"
+    groups: dict[str, Any] = {}
+    for group_id, group in value.items():
+        if not isinstance(group_id, str) or not TELEGRAM_GROUP_ID.fullmatch(group_id) or not isinstance(group, dict):
+            return None, "invalid"
+        if set(group) - {"requireMention", "topics"}:
+            return None, "invalid"
+        require_mention = group.get("requireMention", True)
+        topics = group.get("topics", {})
+        if not isinstance(require_mention, bool) or not isinstance(topics, dict) or len(topics) > TELEGRAM_MAX_TOPICS:
+            return None, "invalid"
+        for topic_id, agent in topics.items():
+            if (
+                not isinstance(topic_id, str) or not TELEGRAM_TOPIC_ID.fullmatch(topic_id)
+                or not isinstance(agent, str) or not TELEGRAM_AGENT_ID.fullmatch(agent)
+            ):
+                return None, "invalid"
+        entry: dict[str, Any] = {"requireMention": require_mention}
+        if topics:
+            entry["topics"] = dict(sorted(topics.items()))
+        groups[group_id] = entry
+    return dict(sorted(groups.items())), "active"
+
+
+def telegram_user_id(user: dict[str, Any]) -> tuple[str | None, str]:
+    """The person's Telegram user id from the self-service attribute: (id, state) with state active, missing or
+    invalid. Surrounding spaces are tolerated; anything that is not a plain number is reported, never guessed."""
+    attributes = user.get("attributes")
+    value = attributes.get(TELEGRAM_ATTRIBUTE) if isinstance(attributes, dict) else None
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None, "missing"
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None, "invalid"
+    text = str(value).strip()
+    return (text, "active") if TELEGRAM_ID.fullmatch(text) else (None, "invalid")
 
 
 def credentials_for_user(user: dict[str, Any], kind: str) -> dict[str, Any] | None:
@@ -316,10 +409,8 @@ def credentials_for_user(user: dict[str, Any], kind: str) -> dict[str, Any] | No
 
     Returns None when any of that kind's required attributes (see
     CREDENTIAL_ATTRIBUTES) is absent, not a string, or blank - the caller
-    treats that identically to how an absent Vault record used to read:
-    ``needs_credentials``, not an error. There is no separate "is this the
-    placeholder" check because there is no longer a placeholder value to
-    write or recognise; an untouched attribute is already empty.
+    treats that as ``needs_credentials``, not an error. There is no separate
+    placeholder check: an untouched attribute is already empty.
     """
     attributes = user.get("attributes")
     if not isinstance(attributes, dict):
@@ -365,14 +456,6 @@ def effective_settings_for_user(user: dict[str, Any], settings: Settings) -> Set
 
 
 def credential_record(kind: str, record: dict[str, Any]) -> bytes:
-    if kind == GIGACODE_KIND:
-        device_id = record.get("device_id")
-        if set(record) != {"device_id"} or not isinstance(device_id, str) or not DEVICE_ID.fullmatch(device_id):
-            raise fail("gigacode device_id attribute must be a 64-character hexadecimal string")
-        # The bridge accepts the Device ID as an opaque secret.  It must not
-        # be probed here: a diagnostic request would itself consume a
-        # subscription request and can produce provider-side telemetry.
-        return device_id.lower().encode("ascii")
     if kind in ("jira", "confluence"):
         pat = record.get("pat")
         if set(record) != {"pat"} or not isinstance(pat, str) or not pat.strip() or len(pat) > 8192:
@@ -388,13 +471,11 @@ def credential_record(kind: str, record: dict[str, Any]) -> bytes:
 
 
 def credential_fingerprint(secret: bytes) -> str:
-    """A stable, non-reversible stand-in for Vault KV's old version counter.
+    """Return a stable, non-reversible credential change marker.
 
-    Authentik attributes have no built-in per-field version number the way
-    Vault KV v2 did, so secret rotation now keys off whether the credential's
-    own value changed since the previous reconcile (see reconcile()'s use of
-    this against the previous manifest's "valueFingerprint"), not an
-    externally incremented counter.
+    Authentik attributes have no per-field version counter, so rotation keys
+    off whether the credential value changed since the previous reconcile
+    (via the manifest's ``valueFingerprint``).
     """
     return hashlib.sha256(secret).hexdigest()[:16]
 
@@ -436,8 +517,6 @@ def probe_imap(settings: Settings, username: str, password: str, context: ssl.SS
 
 
 def probe(kind: str, secret: bytes, settings: Settings) -> None:
-    if kind == GIGACODE_KIND:
-        return
     payload = json.loads(secret)
     context = ssl_context(settings.upstream_ca_file)
     if kind == "jira":
@@ -488,26 +567,21 @@ def remove_service(name: str) -> None:
 
 
 def readonly_mcp_service_name(kind: str, slug: str) -> str:
-    # GigaCode is reconciled next to the read-only MCP integrations (see
-    # SERVICE_KINDS above) but is not itself an MCP server, so its rendered
-    # Swarm service does not follow the "{kind}-readonly-mcp-{slug}" naming
-    # render-profile.py and apply.sh's check_readonly_mcp_configuration()
-    # already special-case this the same way; kept in sync with both.
-    if kind == GIGACODE_KIND:
-        return f"gigacode-subscription-bridge-{slug}"
     return f"{kind}-readonly-mcp-{slug}"
 
 
 def slug_for(subject: str) -> str:
     # Docker Swarm limits service names to 63 characters. The longest
-    # generated prefix is ``gigacode-subscription-bridge-``; embedding a full
+    # generated prefix is ``confluence-readonly-mcp-``; embedding a full
     # 32-hex-character UUID would exceed that limit. A deterministic 96-bit
     # SHA-256 prefix is collision-resistant for this installation and keeps
     # the internal identifier opaque rather than exposing the Authentik UUID
     # in service/DNS names.
     # `docker stack deploy` prefixes every service with ``ai-stand_``. Keep
     # the whole resulting Swarm name within 63 characters: 9 (stack prefix)
-    # + 29 (longest service prefix) + 25 (``u-`` plus 23 hash chars) = 63.
+    # + 24 (longest service prefix) + 25 (``u-`` plus 23 hash chars) = 58.
+    # The slug length is deliberately unchanged so existing service and
+    # Docker Secret names stay stable.
     slug = "u-" + hashlib.sha256(subject.encode("ascii")).hexdigest()[:23]
     if not SAFE_SLUG.fullmatch(slug):
         raise fail("cannot derive safe service slug")
@@ -515,11 +589,6 @@ def slug_for(subject: str) -> str:
 
 
 def secret_names(kind: str, slug: str, version: int) -> tuple[str, str]:
-    if kind == GIGACODE_KIND:
-        return (
-            f"ai-stand-gigacode-{slug}-device-v{version}",
-            f"ai-stand-gigacode-{slug}-internal-v{version}",
-        )
     return (
         f"ai-stand-mcp-{kind}-{slug}-credentials-v{version}",
         f"ai-stand-mcp-{kind}-{slug}-internal-v{version}",
@@ -564,26 +633,17 @@ def old_services(manifest: dict[str, Any]) -> dict[tuple[str, str], dict[str, An
         if not isinstance(user, dict) or not isinstance(user.get("slug"), str):
             continue
         for kind, service in (user.get("services") or {}).items():
-            if kind in SERVICE_KINDS and isinstance(service, dict):
+            if kind in MCP_KINDS and isinstance(service, dict):
                 result[(kind, user["slug"])] = service
     return result
 
 
 def referenced_secrets(manifest: dict[str, Any]) -> set[str]:
-    """Return Secret references held by active services and MetaMCP."""
+    """Return Secret references held by active services."""
     names: set[str] = set()
-    for (kind, _), service in old_services(manifest).items():
-        fields = ("deviceIdSecret", "internalTokenSecret") if kind == GIGACODE_KIND else ("credentialSecret", "internalTokenSecret")
-        for field in fields:
+    for service in old_services(manifest).values():
+        for field in ("credentialSecret", "internalTokenSecret"):
             value = service.get(field)
-            if isinstance(value, str) and SECRET_NAME.fullmatch(value):
-                names.add(value)
-    for user in manifest.get("users", []):
-        if not isinstance(user, dict):
-            continue
-        personal = user.get("metamcp")
-        if isinstance(personal, dict):
-            value = personal.get("backendKeySecret")
             if isinstance(value, str) and SECRET_NAME.fullmatch(value):
                 names.add(value)
     return names
@@ -598,10 +658,18 @@ def settings_fingerprint(settings: Settings) -> str:
         "imapHost": settings.imap_host,
         "imapPort": settings.imap_port,
         "imapTlsMode": settings.imap_tls_mode,
-        "metamcpEnabled": settings.metamcp_enabled,
         "allowUserUpstreamOverrides": settings.allow_user_upstream_overrides,
     }
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def telegram_manifest(user_ids: list[str], owner_id: str | None, groups: dict[str, Any] | None) -> dict[str, Any]:
+    """What apply.sh pushes to the gateway. `groups` is left out unless the attribute was read cleanly, which tells the
+    gateway not to touch its groups; an empty object, by contrast, removes them all."""
+    manifest: dict[str, Any] = {"userIds": user_ids, "ownerIds": [owner_id] if owner_id else []}
+    if groups is not None:
+        manifest["groups"] = groups
+    return manifest
 
 
 def apply_manifest(script: Path, installation: str, node: str) -> None:
@@ -632,6 +700,7 @@ def reconcile(
         require_swarm_manager()
     desired_users: list[dict[str, Any]] = []
     statuses: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    telegram_ids: set[str] = set()
 
     for user in authentik.ai_users():
         subject = str(user.get("uuid", "")).lower()
@@ -639,7 +708,7 @@ def reconcile(
         user_settings = effective_settings_for_user(user, settings)
         services: dict[str, Any] = {}
         service_status: dict[str, Any] = {}
-        for kind in SERVICE_KINDS:
+        for kind in MCP_KINDS:
             try:
                 record = credentials_for_user(user, kind)
                 if record is None:
@@ -657,8 +726,7 @@ def reconcile(
                     version = previous_version
                 else:
                     # A changed (or first-seen) credential value always gets
-                    # its own secret name, exactly like a Vault KV write used
-                    # to bump the version - never overwrite a Docker Secret
+                    # its own secret name - never overwrite a Docker Secret
                     # in place, since a task from the previous rolling update
                     # may still reference it.
                     version = previous_version + 1 if has_previous_version else 1
@@ -666,41 +734,37 @@ def reconcile(
                 if not dry_run:
                     create_docker_secret(credential_secret, credential)
                     create_docker_secret(internal_secret, secrets.token_urlsafe(32).encode("ascii"))
-                if kind == GIGACODE_KIND:
-                    services[kind] = {
-                        "deviceIdSecret": credential_secret,
-                        "internalTokenSecret": internal_secret,
-                        "secretVersion": version,
-                        "valueFingerprint": fingerprint,
-                    }
-                else:
-                    services[kind] = {
-                        "credentialSecret": credential_secret,
-                        "internalTokenSecret": internal_secret,
-                        "secretVersion": version,
-                        "valueFingerprint": fingerprint,
-                    }
+                services[kind] = {
+                    "credentialSecret": credential_secret,
+                    "internalTokenSecret": internal_secret,
+                    "secretVersion": version,
+                    "valueFingerprint": fingerprint,
+                }
                 service_status[kind] = {"state": "active", "version": version}
                 audit("service-checked", subject=subject, kind=kind, state="active", version=version)
             except ReconcileError:
                 service_status[kind] = {"state": "unavailable"}
                 audit("service-checked", subject=subject, kind=kind, state="unavailable")
 
-        # Do not turn a central MetaMCP namespace into a fallback backend.
-        # Personal MCP becomes active only after the separately reviewed
-        # ownership migration and isolated tenant runtime controller have
-        # attested their descriptor. Keeping it absent from this manifest is
-        # what makes Agentgateway return a deny rather than leak a shared
-        # endpoint during an incomplete migration.
-        personal_status = "awaiting_isolated_tenant_controller" if settings.metamcp_enabled else "disabled"
+        telegram_id, telegram_state = telegram_user_id(user)
+        if telegram_id:
+            telegram_ids.add(telegram_id)
+        audit("telegram-checked", subject=subject, state=telegram_state)
+
         entry: dict[str, Any] = {"subject": subject, "slug": slug, "services": services}
         desired_users.append(entry)
         statuses.append((user, {
             "credentialSource": "authentik-user-attributes",
             "checkedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "services": service_status,
-            "personal": {"state": personal_status},
+            "telegram": {"state": telegram_state},
         }))
+
+    owner = authentik.telegram_owner()
+    owner_id, owner_state = telegram_user_id(owner) if owner else (None, "missing")
+    groups, groups_state = telegram_groups(owner)
+    audit("telegram-owner-checked", state=owner_state)
+    audit("telegram-groups-checked", state=groups_state, count=len(groups or {}))
 
     # Keep stale Secret names in the manifest until Swarm no longer has an
     # old task that references them.  This makes credentials rotation safe
@@ -716,6 +780,8 @@ def reconcile(
         "version": 2,
         "configurationFingerprint": settings_fingerprint(settings),
         "users": desired_users,
+        # apply.sh pushes this list to the OpenClaw gateway; the people stay out of it, only the numbers travel.
+        "telegram": telegram_manifest(sorted(telegram_ids), owner_id, groups),
         "retiredSecrets": sorted(retired_secrets),
     }
     changed = json.dumps(previous, sort_keys=True, separators=(",", ":")) != json.dumps(desired, sort_keys=True, separators=(",", ":"))

@@ -14,6 +14,8 @@ AI_STAND_DIR="$(cd -- "${INSTALLATION_DIR}/../.." && pwd)"
 
 # shellcheck disable=SC1091
 . "${INSTALLATION_DIR}/installation.sh"
+# The Python helpers take the installation's storage root from the environment.
+export STORAGE_ROOT
 
 ACCELERATOR="$DEFAULT_ACCELERATOR"
 MANAGER_JOIN_TOKEN=""
@@ -33,16 +35,26 @@ Commands:
   host-ai02
   images-ai01
   images-ai02
+  model-catalog-ai01
+  model-catalog-ai02
   deploy
+  templates-ai02
   reconcile-mcp
   configure-authentik
+  configure-gitea
+  configure-gitea-ssh-sync
+  configure-ssh-key-delivery
+  cleanup-legacy-gitea-ssh-sync
+  deploy-controller
+  cleanup-legacy-host-timers-ai01
+  cleanup-legacy-host-timers-ai02
   onboard-readonly-mcp-user --username <u> --email <e> [--groups ai-users]
-  migrate-metamcp-tenants
   configure-portainer
   verify-ai01
   verify-ai02
   credentials
   model-apply
+  model-migrate-q4
   model-status
   model-verify
 
@@ -187,7 +199,7 @@ run_generic_apply() {
   )
   trusted_args_append args
 
-  if [ "$node_name" = "$AI01_NODE_NAME" ]; then
+  if [ "$node_name" = "$AI01_NODE_NAME" ] || [ "$node_name" = "$AI02_NODE_NAME" ]; then
     args+=(--accelerator "$ACCELERATOR")
   fi
 
@@ -216,7 +228,7 @@ run_generic_images() {
     --node-name "$node_name"
   )
 
-  if [ "$node_name" = "$AI01_NODE_NAME" ]; then
+  if [ "$node_name" = "$AI01_NODE_NAME" ] || [ "$node_name" = "$AI02_NODE_NAME" ]; then
     args+=(--accelerator "$ACCELERATOR")
   fi
 
@@ -269,6 +281,31 @@ run_model_profile() {
   fi
 }
 
+run_model_catalog() {
+  local node_name="$1" role="$2" suffix
+  case "$node_name" in
+    "$AI01_NODE_NAME") suffix=01 ;;
+    "$AI02_NODE_NAME") suffix=02 ;;
+    *) die "Unsupported model catalog node" ;;
+  esac
+  [ "$(hostname -s)" = "$node_name" ] || die "Model catalog stage must run locally on $node_name"
+  local helper="${AI_STAND_DIR}/model-catalog/prepare.py"
+  [ -r "$helper" ] || die "Pinned model catalog helper is missing"
+  local prefix
+  prefix="$(sudo_prefix || true)"
+  if [ -n "$prefix" ]; then
+    "$prefix" python3 "$helper" --role "$role" --root "${STORAGE_ROOT}/llamacpp-data/llamacpp${suffix}"
+  else
+    python3 "$helper" --role "$role" --root "${STORAGE_ROOT}/llamacpp-data/llamacpp${suffix}"
+  fi
+}
+
+migrate_existing_consumers_before_deploy() {
+  # The migration controller distinguishes verified empty storage from
+  # recovery by inspecting data, never merely by absent Swarm services.
+  run_model_profile apply
+}
+
 command_name="${1:-}"
 case "$command_name" in
   -h|--help|help|'')
@@ -298,18 +335,25 @@ case "$command_name" in
   images-ai02)
     run_generic_images "$AI02_NODE_NAME"
     ;;
+  model-catalog-ai01)
+    run_model_catalog "$AI01_NODE_NAME" chat
+    ;;
+  model-catalog-ai02)
+    run_model_catalog "$AI02_NODE_NAME" embedding
+    ;;
   deploy)
     # `ai-stand/apply.sh deploy` itself resets the model profile back to
     # compose.yaml's generic default (see MODEL_PROFILE_SCRIPT/model-apply
     # below) - it has no notion of "this installation's intended model" at
     # all, being shared across every installation. Re-applying it here,
     # right after, means a plain `deploy` can no longer silently regress
-    # LM Studio/Open WebUI back to the small default the way it repeatedly
+    # llama.cpp/Open WebUI back to the small default the way it repeatedly
     # has (confirmed live 2026-09-10, twice in one session). If the
     # resolved-context state file doesn't exist yet, this can take a long
     # time the first time (model-apply retries multiple context sizes) -
     # that cost was already unavoidable on the very next model-apply run
     # either way, just now paid immediately instead of silently deferred.
+    migrate_existing_consumers_before_deploy
     run_generic_apply deploy "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
     # configure-authentik right after deploy, unconditionally, for the same
     # reason model-apply already runs unconditionally below: on a genuinely
@@ -327,7 +371,22 @@ case "$command_name" in
     # automatic here means a plain `deploy` can't leave the stack in that
     # half-working state even if nobody runs the next command right away.
     run_generic_apply configure-authentik "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
+    run_generic_apply configure-gitea "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
+    if [ "${GITEA_SSH_SYNC_ENABLED:-0}" = "1" ]; then
+      run_generic_apply configure-gitea-ssh-sync "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
+    fi
+    if [ "${SSH_KEY_DELIVERY_ENABLED:-0}" = "1" ]; then
+      run_generic_apply configure-ssh-key-delivery "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
+    fi
     run_model_profile apply
+    # This wrapper runs locally on ai01. Merely passing node-name=ai02
+    # does not execute the publisher there, and its token/local Coder task
+    # intentionally exist only on ai02. Keep the explicit node-local stage
+    # instead of introducing cross-host SSH credentials into the installer.
+    log "Deployment requires the final templates-ai02 stage on ${AI02_HOST}"
+    ;;
+  templates-ai02)
+    run_generic_apply templates "$AI02_NODE_NAME" "$AI02_IP" "$AI01_IP"
     ;;
   reconcile-mcp)
     run_generic_apply reconcile-mcp "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
@@ -335,14 +394,32 @@ case "$command_name" in
   configure-authentik)
     run_generic_apply configure-authentik "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
     ;;
+  configure-gitea)
+      run_generic_apply configure-gitea "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
+      ;;
+  configure-gitea-ssh-sync)
+    run_generic_apply configure-gitea-ssh-sync "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
+    ;;
+  configure-ssh-key-delivery)
+    run_generic_apply configure-ssh-key-delivery "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
+    ;;
+  deploy-controller)
+    run_generic_apply deploy-controller "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
+    ;;
+  cleanup-legacy-host-timers-ai01)
+    run_generic_apply cleanup-legacy-host-timers "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
+    ;;
+  cleanup-legacy-host-timers-ai02)
+    run_generic_apply cleanup-legacy-host-timers "$AI02_NODE_NAME" "$AI02_IP" "$AI01_IP"
+    ;;
+  cleanup-legacy-gitea-ssh-sync)
+    run_generic_apply cleanup-legacy-gitea-ssh-sync "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
+    ;;
   onboard-readonly-mcp-user)
     [ -n "$ONBOARD_USERNAME" ] || die "--username is required for onboard-readonly-mcp-user"
     [ -n "$ONBOARD_EMAIL" ] || die "--email is required for onboard-readonly-mcp-user"
     run_generic_apply onboard-readonly-mcp-user "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP" \
       --username "$ONBOARD_USERNAME" --email "$ONBOARD_EMAIL" --groups "$ONBOARD_GROUPS"
-    ;;
-  migrate-metamcp-tenants)
-    run_generic_apply migrate-metamcp-tenants "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
     ;;
   configure-portainer)
     run_generic_apply configure-portainer "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
@@ -357,6 +434,9 @@ case "$command_name" in
     run_generic_apply credentials "$AI01_NODE_NAME" "$AI01_IP" "$AI02_IP"
     ;;
   model-apply)
+    run_model_profile apply
+    ;;
+  model-migrate-q4)
     run_model_profile apply
     ;;
   model-status)

@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch the ai-stand TLS lineage for changes
+
+[Path]
+# certbot swaps symbolic links inside live/<domain>; the receiver swaps the whole directory inside live/.
+PathChanged=@CERTBOT_DATA@/live
+PathChanged=@CERTBOT_DATA@/live/@CERT_DOMAIN@
+Unit=ai-stand-nginx-reload.service
+
+[Install]
+WantedBy=multi-user.target

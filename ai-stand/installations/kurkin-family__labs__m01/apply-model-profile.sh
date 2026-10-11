@@ -1,599 +1,190 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 export PATH
-
-SCRIPT_PATH="${BASH_SOURCE[0]}"
-case "$SCRIPT_PATH" in
-  */*) INSTALLATION_DIR="$(cd -- "${SCRIPT_PATH%/*}" && pwd)" ;;
-  *) INSTALLATION_DIR="$(pwd)" ;;
-esac
-
+INSTALLATION_DIR="$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)"
 # shellcheck disable=SC1091
 . "${INSTALLATION_DIR}/installation.sh"
-
-STACK_NAME="ai-stand"
+# The Python helpers below take the installation's storage root from the environment.
+export STORAGE_ROOT
+CORE_DIR="$(cd -- "${INSTALLATION_DIR}/../.." && pwd)"
+STACK_NAME=ai-stand
 PROFILE_NAME="$INSTALLATION_NAME"
-PROFILE_STATE_DIR="/mnt/storage/lmstudio-data/lmstudio/.ai-stand/${PROFILE_NAME}"
+PROFILE_STATE_DIR="${STORAGE_ROOT}/llamacpp-data/llamacpp01/state/.ai-stand/${PROFILE_NAME}"
 PROFILE_CONTEXT_STATE="${PROFILE_STATE_DIR}/context.env"
-PROFILE_WORKER_PREFIX="$PROFILE_NAME"
-AI_UID="${AI_UID:-$IM_UID}"
-AI_GID="${AI_GID:-$IM_GID}"
-
-CHAT_MODEL_SOURCE="qwen/qwen3.8-27b@q8_0"
-# Must match service-entrypoint.sh's own LMSTUDIO_MODEL_KEY derivation
-# ("${LMSTUDIO_MODEL%%@*}"): `lms load` is called with this as both the
-# catalog key AND the --identifier. When they differ, LM Studio lists the
-# catalog entry and the custom-identified loaded instance as two separate
-# rows in /v1/models for the same weights; keeping identifier == key
-# collapses them back into one.
-CHAT_MODEL_IDENTIFIER="${CHAT_MODEL_SOURCE%%@*}"
-CHAT_MODEL_FORCE_CONCRETE_MODEL_IDENTIFIER="lmstudio-community/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q8_0.gguf"
-# No Q4 variant is kept anywhere in this installation's catalog (Q4
-# quantization quality deemed too low, 2026-09-06) - nothing to hide.
-CHAT_MODEL_HIDE_VARIANT_FILES=""
-CHAT_CONTEXT_CANDIDATES=(262144 131072 65536 32768 24576 16384 8192 4096)
-CHAT_CONTEXT_LENGTH="${CHAT_CONTEXT_CANDIDATES[0]}"
-CHAT_PARALLEL="1"
-# Placeholder only - always recomputed by openclaw_tokens_for_context()
-# before use.
-OPENCLAW_MAX_TOKENS="32768"
-# This installation deliberately opts into autonomous execution only for the
-# Codex harness. Generic compose defaults to Guardian; see init.mjs for the
-# exact app-server policy and the container/DIND isolation boundary.
-OPENCLAW_CODEX_EXECUTION_PROFILE="autonomous"
-# Keep the concrete LM Studio quantization in the transport/configuration
-# layer, while presenting the stable model family identifier in Open WebUI.
-# Existing chats still retain their exact provider model ID.
-OPENWEBUI_LOCAL_MODEL_DISPLAY_NAME="qwen/qwen3.8-27b"
-
-EMBEDDING_MODEL_SOURCE="https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/resolve/main/Qwen3-Embedding-4B-Q8_0.gguf"
-EMBEDDING_MODEL_KEY="text-embedding-qwen3-embedding-4b"
-EMBEDDING_MODEL_IDENTIFIER="qwen3-embedding-4b-q8"
-EMBEDDING_CONTEXT_CANDIDATES=(32768 16384 8192)
-EMBEDDING_CONTEXT_LENGTH="${EMBEDDING_CONTEXT_CANDIDATES[0]}"
-EMBEDDING_DIMENSIONS="2560"
-# The m01 profile deliberately shares ai01's GPU-backed LM Studio between
-# the chat and embedding workers. Do not let a stale generic service env
-# silently retain the old CPU setting when model-apply runs independently.
-# lms load accepts a numeric GPU offload ratio; 1 keeps all embedding layers
-# on ai01's GPU (rather than falling back to a CPU inference service).
-EMBEDDING_GPU="1"
-CONTEXT_RESOLVE_TIMEOUT_SECONDS="${CONTEXT_RESOLVE_TIMEOUT_SECONDS:-7200}"
-
-# OPENCLAW_MAX_TOKENS is OpenClaw's per-completion OUTPUT cap (see
-# docker/openclaw/init.mjs's models.providers.lmstudio[0].maxTokens), not a
-# share of the total conversation budget - contextWindow already covers
-# that, and init.mjs enforces maxTokens < contextWindow. It must scale with
-# the resolved chat context: a flat cap here (unchanged 2026-07-27 through
-# 2026-09-06, even after CHAT_CONTEXT_CANDIDATES's ceiling was quadrupled to
-# 262144 on 2026-09-05) needlessly limits a single completion on a
-# large-context model to a tiny fraction of what it can use, and combined
-# with a stale OpenClaw session JIT-reloading an old model, produced a
-# literal n_ctx=8192 backend error on a 262144-context install (2026-09-06
-# incident). These three tunables keep a completion from ever exceeding 1/4
-# of the active context, floored at 2048 (still usable at the smallest chat
-# context candidate) and capped at 32768 (an uncapped ratio would let one
-# runaway generation consume most of a huge context window and crowd out
-# conversation history).
+MODEL_CATALOG_LOCK="${CORE_DIR}/model-catalog/catalog.lock.json"
+# Every model value comes from installation.sh. The embedding dimensions are not a profile value: the pinned catalog
+# knows them, and load_pinned_model_selection takes them from there.
+CHAT_MODEL_SOURCE="$LLAMACPP_CHAT_MODEL_SOURCE"
+CHAT_MODEL_IDENTIFIER="$LLAMACPP_CHAT_MODEL_ID"
+CHAT_CONTEXT_CANDIDATES=("${LLAMACPP_CHAT_CONTEXT_CANDIDATES[@]}")
+CHAT_CONTEXT_LENGTH="$LLAMACPP_CHAT_CONTEXT_LENGTH"
+CHAT_PARALLEL="$LLAMACPP_CHAT_PARALLEL"
+EMBEDDING_MODEL_IDENTIFIER="$LLAMACPP_EMBEDDING_MODEL_ID"
+EMBEDDING_CONTEXT_CANDIDATES=("${LLAMACPP_EMBEDDING_CONTEXT_CANDIDATES[@]}")
+EMBEDDING_CONTEXT_LENGTH="$LLAMACPP_EMBEDDING_CONTEXT_LENGTH"
+EMBEDDING_DIMENSIONS=""
+OPENWEBUI_LOCAL_MODEL_DISPLAY_NAME="$CHAT_MODEL_IDENTIFIER"
 OPENCLAW_MAX_TOKENS_DIVISOR="${OPENCLAW_MAX_TOKENS_DIVISOR:-4}"
 OPENCLAW_MAX_TOKENS_FLOOR="${OPENCLAW_MAX_TOKENS_FLOOR:-2048}"
 OPENCLAW_MAX_TOKENS_CAP="${OPENCLAW_MAX_TOKENS_CAP:-32768}"
-
-# Goes through agentgateway, not lmstudio directly (see
-# agentgateway/config.yaml) - the token is generated once by apply.sh's
-# ensure_ai_stand_secrets() (load_host_secret agentgateway-openwebui-token),
-# well before this script ever runs; a plain top-level `cat` under
-# `set -euo pipefail` is enough to abort cleanly if that assumption is ever
-# wrong (no need for a separate die() call here - not defined yet at this
-# point in the file).
-AGENTGATEWAY_OPENWEBUI_TOKEN="$(cat /mnt/storage/_secrets/agentgateway-openwebui-token)"
-OPENWEBUI_OPENAI_API_CONFIGS="{\"0\":{\"enable\":true,\"base_url\":\"http://agentgateway:4000/v1\",\"api_key\":\"${AGENTGATEWAY_OPENWEBUI_TOKEN}\",\"model_ids\":[\"${CHAT_MODEL_IDENTIFIER}\"]}}"
-# The api_key embedded in OPENAI_API_CONFIGS above is NOT what Open WebUI
-# actually sends as the outbound Authorization bearer - confirmed live
-# 2026-09-11 by reading its own routers/openai.py: the real request uses
-# OPENAI_API_KEYS[idx] (a separate, flat env var), not api_configs[idx].api_key.
-# Before agentgateway existed, leaving this at compose.yaml's placeholder was
-# harmless (LM Studio accepts any non-empty bearer) - now that Open WebUI's
-# traffic goes through agentgateway's apiKey.mode: strict policy, a stale
-# placeholder here means every single chat request gets a 401 from
-# agentgateway that Open WebUI's frontend doesn't surface, rendering as a
-# silently empty response. Must be pushed every run, same as the configs above.
-OPENWEBUI_OPENAI_API_KEYS="$AGENTGATEWAY_OPENWEBUI_TOKEN"
+CONTEXT_RESOLVE_TIMEOUT_SECONDS="${CONTEXT_RESOLVE_TIMEOUT_SECONDS:-7200}"
+AGENTGATEWAY_OPENWEBUI_TOKEN=""
+OPENWEBUI_OPENAI_API_CONFIGS=""
+OPENWEBUI_OPENAI_API_KEYS=""
 OPENWEBUI_DEFAULT_MODELS="$CHAT_MODEL_IDENTIFIER"
 
-# Q4_K_M variants deliberately not downloaded/kept anywhere in this list -
-# quantization quality deemed too low for this installation (2026-09-06).
-BACKGROUND_DOWNLOADS="$(
-  cat <<DOWNLOADS
-$EMBEDDING_MODEL_SOURCE
-https://huggingface.co/Qwen/Qwen3-Embedding-8B-GGUF/resolve/main/Qwen3-Embedding-8B-Q8_0.gguf
-qwen/qwen3.8-27b@q8_0
-qwen/qwen3.6-35b-a3b@q8_0
-qwen/qwen3.6-27b@q8_0
-qwen/qwen3.5-9b@q8_0
-qwen/qwen3-8b@q8_0
-qwen/qwen3-4b@q8_0
-qwen/qwen3-1.7b@q8_0
-DOWNLOADS
-)"
-
-log() {
-  printf '%s\n' "[${PROFILE_NAME}-model-profile] $*"
-}
-
-die() {
-  printf '%s\n' "[${PROFILE_NAME}-model-profile] ERROR: $*" >&2
-  exit 1
-}
-
-usage() {
-  cat <<USAGE
-Usage:
-  apply-model-profile.sh apply
-  apply-model-profile.sh status
-  apply-model-profile.sh verify
-
-Run on ${AI01_HOST} after the generic ai-stand stack is deployed.
-
-This script is installation-specific for ${INSTALLATION_NAME}:
-  - keeps generic ai-stand source fast: qwen/qwen3-1.7b@q8_0;
-  - switches this installation to qwen/qwen3.8-27b@q8_0;
-  - keeps qwen3-embedding-4b-q8 as the active embedding model on GPU;
-  - starts background downloads for the extended local model catalog;
-  - resolves the highest working chat/embedding context from candidate lists;
-  - exposes the local chat model through Agentgateway; the separately managed
-    GigaCode Pipe appears only when the authenticated user has a personal
-    subscription device ID in their own Authentik attributes.
-USAGE
-}
-
-require_commands() {
-  command -v docker >/dev/null 2>&1 || die "docker is required"
-  command -v jq >/dev/null 2>&1 || die "jq is required"
-}
-
-service_name() {
-  printf '%s_%s\n' "$STACK_NAME" "$1"
-}
-
-ensure_service() {
-  local svc
-  svc="$(service_name "$1")"
-  docker service inspect "$svc" >/dev/null 2>&1 || die "Missing service: $svc"
-}
-
-current_env_value() {
-  local svc="$1"
-  local key="$2"
-  docker service inspect "$svc" \
-    | jq -r \
-      --arg key "$key" \
-      '.[0].Spec.TaskTemplate.ContainerSpec.Env // []
-       | map(select(startswith($key + "=")))
-       | .[0] // empty
-       | .[(($key | length) + 1):]'
-}
-
-has_env_key() {
-  local svc="$1"
-  local key="$2"
-  docker service inspect "$svc" \
-    | jq -e \
-      --arg key "$key" \
-      '.[0].Spec.TaskTemplate.ContainerSpec.Env // []
-       | map(select(startswith($key + "=")))
-       | length > 0' >/dev/null
-}
-
-update_service_env() {
-  local short_name="$1"
-  shift
-
-  local svc
-  svc="$(service_name "$short_name")"
-  ensure_service "$short_name"
-
-  local args
-  args=(--detach=true)
-  local changed="false"
-
-  local kv key desired current
-  for kv in "$@"; do
-    key="${kv%%=*}"
-    desired="${kv#*=}"
-    current="$(current_env_value "$svc" "$key")"
-
-    if [ "$current" = "$desired" ]; then
-      continue
-    fi
-
-    if has_env_key "$svc" "$key"; then
-      args+=(--env-rm "$key")
-    fi
-    args+=(--env-add "$key=$desired")
-    changed="true"
-  done
-
-  if [ "$changed" = "true" ]; then
-    log "Updating environment for $svc"
-    docker service update "${args[@]}" "$svc" >/dev/null
-  else
-    log "$svc environment is already up to date"
-  fi
-}
-
-remove_service_env_keys() {
-  local short_name="$1"
-  shift
-  local svc
-  svc="$(service_name "$short_name")"
-  ensure_service "$short_name"
-
-  local -a args=(--detach=true)
-  local key changed="false"
-  for key in "$@"; do
-    if has_env_key "$svc" "$key"; then
-      args+=(--env-rm "$key")
-      changed="true"
-    fi
-  done
-  [ "$changed" = "true" ] || return 0
-  log "Removing retired environment keys from $svc"
-  docker service update "${args[@]}" "$svc" >/dev/null
-}
-
-local_lmstudio_container() {
-  docker ps \
-    --filter "label=com.docker.swarm.service.name=$(service_name lmstudio)" \
-    --format '{{.ID}}' \
-    | head -n 1 || true
-}
-
-local_service_container() {
-  local short_name="$1"
-  docker ps \
-    --filter "label=com.docker.swarm.service.name=$(service_name "$short_name")" \
-    --format '{{.ID}}' \
-    | head -n 1 || true
-}
-
-local_lmstudio_container_with_profile() {
-  local cid value
-
-  while IFS= read -r cid; do
-    [ -n "$cid" ] || continue
-
-    value="$(docker inspect "$cid" \
-      | jq -r \
-        '.[0].Config.Env // []
-         | map(select(startswith("LMSTUDIO_MODEL_IDENTIFIER=")))
-         | .[0] // ""
-         | sub("^LMSTUDIO_MODEL_IDENTIFIER="; "")')"
-    if [ "$value" != "$CHAT_MODEL_IDENTIFIER" ]; then
-      continue
-    fi
-
-    value="$(docker inspect "$cid" \
-      | jq -r \
-        '.[0].Config.Env // []
-         | map(select(startswith("LMSTUDIO_CONTEXT_LENGTH=")))
-         | .[0] // ""
-         | sub("^LMSTUDIO_CONTEXT_LENGTH="; "")')"
-    if [ "$value" != "$CHAT_CONTEXT_LENGTH" ]; then
-      continue
-    fi
-
-    printf '%s\n' "$cid"
-    return 0
-  done <<CONTAINERS
-$(docker ps \
-  --filter "label=com.docker.swarm.service.name=$(service_name lmstudio)" \
-  --format '{{.ID}}')
-CONTAINERS
-
-  return 1
-}
-
-container_models_include() {
-  local cid="$1"
-  local chat_id="$2"
-  local embedding_id="$3"
-
-  docker exec -u ai "$cid" sh -lc \
-    '$HOME/.lmstudio/bin/lms ps --json' \
-    | jq -e \
-      --arg chat_id "$chat_id" \
-      --arg embedding_id "$embedding_id" \
-      'any(.[]?;
-          .identifier == $chat_id
-          and ((.status // "") | ascii_downcase) == "idle"
-        )
-       and any(.[]?;
-          .identifier == $embedding_id
-          and ((.status // "") | ascii_downcase) == "idle"
-        )' >/dev/null
-}
-
-dump_lmstudio_profile_debug() {
-  docker service ps "$(service_name lmstudio)" --no-trunc || true
-
-  local cid
-  cid="$(local_lmstudio_container || true)"
-  if [ -n "$cid" ]; then
-    log "LM Studio current models:"
-    docker exec -u ai "$cid" sh -lc \
-      'curl -fsS http://127.0.0.1:${LMSTUDIO_PORT:-1234}/v1/models 2>/dev/null | jq -r ".data[]?.id" | sort || true' || true
-    log "LM Studio current env:"
-    docker inspect "$cid" \
-      | jq -r '.[0].Config.Env // [] | map(select(startswith("LMSTUDIO_"))) | .[]' \
-      | sort || true
-  fi
-}
-
-try_wait_lmstudio_profile_ready() {
-  local timeout_seconds="${1:-7200}"
-  local elapsed="0"
-  local cid=""
-
-  while [ "$elapsed" -lt "$timeout_seconds" ]; do
-    if [ "$(docker service ls --filter "name=$(service_name lmstudio)" --format '{{.Replicas}}' | head -n 1)" = "1/1" ]; then
-      cid="$(local_lmstudio_container_with_profile || true)"
-      if [ -n "$cid" ] && container_models_include "$cid" "$CHAT_MODEL_IDENTIFIER" "$EMBEDDING_MODEL_IDENTIFIER"; then
-        log "LM Studio m01 profile is ready in container $cid"
-        return 0
-      fi
-    fi
-
-    sleep 15
-    elapsed="$((elapsed + 15))"
-  done
-
-  dump_lmstudio_profile_debug
-  return 1
-}
-
-wait_lmstudio_profile_ready() {
-  local timeout_seconds="${1:-7200}"
-  try_wait_lmstudio_profile_ready "$timeout_seconds" \
-    || die "LM Studio m01 profile did not become ready within ${timeout_seconds}s"
-}
-
+log() { printf '%s\n' "[${PROFILE_NAME}-model-profile] $*"; }
+die() { printf '%s\n' "[${PROFILE_NAME}-model-profile] ERROR: $*" >&2; exit 1; }
+service_name() { printf '%s_%s\n' "$STACK_NAME" "$1"; }
+usage() { printf '%s\n' 'Usage: apply-model-profile.sh apply|backend-apply|consumers-apply|consumers-ready|status|verify'; }
+is_array_member() { local wanted="$1" value; shift; for value in "$@"; do [ "$value" = "$wanted" ] && return 0; done; return 1; }
 openclaw_tokens_for_context() {
-  local context="$1"
-  local tokens="$((context / OPENCLAW_MAX_TOKENS_DIVISOR))"
-
-  if [ "$tokens" -lt "$OPENCLAW_MAX_TOKENS_FLOOR" ]; then
-    tokens="$OPENCLAW_MAX_TOKENS_FLOOR"
-  fi
-  if [ "$tokens" -gt "$OPENCLAW_MAX_TOKENS_CAP" ]; then
-    tokens="$OPENCLAW_MAX_TOKENS_CAP"
-  fi
-
+  local tokens="$(( $1 / OPENCLAW_MAX_TOKENS_DIVISOR ))"
+  [ "$tokens" -ge "$OPENCLAW_MAX_TOKENS_FLOOR" ] || tokens="$OPENCLAW_MAX_TOKENS_FLOOR"
+  [ "$tokens" -le "$OPENCLAW_MAX_TOKENS_CAP" ] || tokens="$OPENCLAW_MAX_TOKENS_CAP"
   printf '%s\n' "$tokens"
 }
-
-is_array_member() {
-  local value="$1"
-  shift
-
-  local item
-  for item in "$@"; do
-    if [ "$item" = "$value" ]; then
-      return 0
+load_pinned_model_selection() {
+  local image_version selected
+  image_version="$(sed -n 's/^LLAMACPP_IMAGE_VERSION="\([0-9.-]*\)"$/\1/p' "${CORE_DIR}/apply.sh")"
+  selected="$(python3 "${CORE_DIR}/model-catalog/selection.py" --catalog "$MODEL_CATALOG_LOCK" \
+    --chat-model "$CHAT_MODEL_IDENTIFIER" --embedding-model "$EMBEDDING_MODEL_IDENTIFIER" \
+    --chat-gfx "$AI01_ROCM_GFX_VERSION" --embedding-gfx "$AI02_ROCM_GFX_VERSION" \
+    --chat-policy-max-context "$LLAMACPP_CHAT_POLICY_MAX_CONTEXT" --image-version "$image_version" --format shell)" || die "Pinned native model selection failed"
+  # Output is shell-quoted exclusively by our checked-in read-only selector.
+  eval "$selected"
+  PROFILE_MODEL_FINGERPRINT="$LLAMACPP_MODEL_CATALOG_FINGERPRINT"
+  CHAT_MODEL_PATH="$LLAMACPP_CHAT_MODEL_PATH"
+  CHAT_MODEL_SHA256="$LLAMACPP_CHAT_MODEL_SHA256"
+  CHAT_PROJECTOR_PATH="$LLAMACPP_CHAT_PROJECTOR_PATH"
+  CHAT_PROJECTOR_SHA256="$LLAMACPP_CHAT_PROJECTOR_SHA256"
+  EMBEDDING_MODEL_PATH="$LLAMACPP_EMBEDDING_MODEL_PATH"
+  EMBEDDING_MODEL_SHA256="$LLAMACPP_EMBEDDING_MODEL_SHA256"
+  EMBEDDING_DIMENSIONS="$LLAMACPP_EMBEDDING_DIMENSIONS"
+}
+require_commands() {
+  local command
+  for command in docker jq python3 sha256sum; do command -v "$command" >/dev/null || die "$command is required"; done
+  load_pinned_model_selection
+}
+require_model_api_token() {
+  AGENTGATEWAY_OPENWEBUI_TOKEN="$(cat "${STORAGE_ROOT}/_secrets/agentgateway-openwebui-token")"
+  OPENWEBUI_OPENAI_API_KEYS="$AGENTGATEWAY_OPENWEBUI_TOKEN"
+  OPENWEBUI_OPENAI_API_CONFIGS="$(jq -cn --arg id "$CHAT_MODEL_IDENTIFIER" --arg key "$AGENTGATEWAY_OPENWEBUI_TOKEN" \
+    '{"0":{enable:true,base_url:"http://agentgateway:4000/v1",api_key:$key,model_ids:[$id]}}')"
+}
+ensure_service() { docker service inspect "$(service_name "$1")" >/dev/null 2>&1 || die "Missing service: $(service_name "$1")"; }
+current_env_value() {
+  docker service inspect "$1" | jq -r --arg key "$2" \
+    '.[0].Spec.TaskTemplate.ContainerSpec.Env // [] | map(select(startswith($key + "="))) | .[0] // empty | .[(($key | length) + 1):]'
+}
+has_env_key() { [ -n "$(current_env_value "$1" "$2")" ]; }
+update_service_env() {
+  local name="$1" kv key desired current changed=false; shift
+  ensure_service "$name"
+  local svc="$(service_name "$name")"
+  local -a args=(--detach=true)
+  if [ "$name" = openclaw-gateway ]; then
+    local image_version desired_image current_image replicas
+    image_version="$(sed -n 's/^OPENCLAW_IMAGE_VERSION="\([0-9.-]*\)"$/\1/p' "${CORE_DIR}/apply.sh")"
+    [[ "$image_version" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]+$ ]] || die "Pinned consumer image is unavailable"
+    desired_image="ghcr.io/kukurusik/ai-stand-openclaw:${image_version}"
+    current_image="$(docker service inspect "$svc" | jq -r '.[0].Spec.TaskTemplate.ContainerSpec.Image')"
+    if [ "${current_image%%@*}" != "$desired_image" ]; then
+      replicas="$(docker service inspect "$svc" | jq -r '.[0].Spec.Mode.Replicated.Replicas')"
+      [ "$replicas" = 0 ] || die "A changed consumer image requires stopped consumers and a protected state backup; runtime-only updates do not require index migration"
+      args+=(--image "$desired_image" --no-resolve-image)
+      changed=true
     fi
+  fi
+  for kv in "$@"; do
+    key="${kv%%=*}"; desired="${kv#*=}"; current="$(current_env_value "$svc" "$key")"
+    [ "$current" != "$desired" ] || continue
+    args+=(--env-rm "$key" --env-add "$kv"); changed=true
   done
-
-  return 1
+  if [ "$changed" = true ]; then docker service update "${args[@]}" "$svc" >/dev/null; fi
 }
-
-state_value() {
-  local key="$1"
-  [ -r "$PROFILE_CONTEXT_STATE" ] || return 1
-  sed -n "s/^${key}=//p" "$PROFILE_CONTEXT_STATE" | tail -n 1
+local_service_container() {
+  docker ps --filter "label=com.docker.swarm.service.name=$(service_name "$1")" --format '{{.ID}}' | head -n 1
 }
-
-load_resolved_context_from_state() {
-  local chat_context
-  local embedding_context
-
-  chat_context="$(state_value CHAT_CONTEXT_LENGTH || true)"
-  embedding_context="$(state_value EMBEDDING_CONTEXT_LENGTH || true)"
-
-  if ! is_array_member "$chat_context" "${CHAT_CONTEXT_CANDIDATES[@]}"; then
-    return 1
-  fi
-  if ! is_array_member "$embedding_context" "${EMBEDDING_CONTEXT_CANDIDATES[@]}"; then
-    return 1
-  fi
-
-  CHAT_CONTEXT_LENGTH="$chat_context"
-  EMBEDDING_CONTEXT_LENGTH="$embedding_context"
-  # Always re-derive from the just-validated chat context instead of trusting
-  # a persisted OPENCLAW_MAX_TOKENS value: openclaw_tokens_for_context() is a
-  # pure function of chat context, so persisting/validating its output here
-  # separately only creates another place that can go stale (exactly how
-  # this flatlined at 8192 in 2026-09). Recomputing also self-heals any
-  # installation that already persisted a stale value under the old bug the
-  # next time model-apply runs, without deleting the state file / forcing a
-  # full re-probe.
-  OPENCLAW_MAX_TOKENS="$(openclaw_tokens_for_context "$CHAT_CONTEXT_LENGTH")"
-  log "Loaded resolved context from state: chat=${CHAT_CONTEXT_LENGTH}, embedding=${EMBEDDING_CONTEXT_LENGTH}, openclaw_max=${OPENCLAW_MAX_TOKENS}"
-  return 0
-}
-
-persist_resolved_context_state() {
-  mkdir -p "$PROFILE_STATE_DIR"
-
-  local tmp
-  tmp="$(mktemp "${PROFILE_STATE_DIR}/context.env.XXXXXX")"
-  {
-    printf 'CHAT_MODEL_IDENTIFIER=%s\n' "$CHAT_MODEL_IDENTIFIER"
-    printf 'CHAT_CONTEXT_LENGTH=%s\n' "$CHAT_CONTEXT_LENGTH"
-    printf 'EMBEDDING_MODEL_IDENTIFIER=%s\n' "$EMBEDDING_MODEL_IDENTIFIER"
-    printf 'EMBEDDING_CONTEXT_LENGTH=%s\n' "$EMBEDDING_CONTEXT_LENGTH"
-    printf 'OPENCLAW_MAX_TOKENS=%s\n' "$OPENCLAW_MAX_TOKENS"
-  } > "$tmp"
-  chmod 0640 "$tmp"
-  mv "$tmp" "$PROFILE_CONTEXT_STATE"
-  chown -R "${AI_UID}:${AI_GID}" "$PROFILE_STATE_DIR" 2>/dev/null || true
-  log "Persisted resolved context state: ${PROFILE_CONTEXT_STATE}"
-}
-
-update_lmstudio_profile_env() {
-  update_service_env lmstudio \
-    "LMSTUDIO_MODEL=$CHAT_MODEL_SOURCE" \
-    "LMSTUDIO_MODEL_IDENTIFIER=$CHAT_MODEL_IDENTIFIER" \
-    "LMSTUDIO_MODEL_FORCE_CONCRETE_MODEL_IDENTIFIER=$CHAT_MODEL_FORCE_CONCRETE_MODEL_IDENTIFIER" \
-    "LMSTUDIO_MODEL_HIDE_VARIANT_FILES=$CHAT_MODEL_HIDE_VARIANT_FILES" \
-    "LMSTUDIO_CONTEXT_LENGTH=$CHAT_CONTEXT_LENGTH" \
-    "LMSTUDIO_PARALLEL=$CHAT_PARALLEL" \
-    "LMSTUDIO_EMBEDDING_MODEL=$EMBEDDING_MODEL_SOURCE" \
-    "LMSTUDIO_EMBEDDING_MODEL_KEY=$EMBEDDING_MODEL_KEY" \
-    "LMSTUDIO_EMBEDDING_MODEL_IDENTIFIER=$EMBEDDING_MODEL_IDENTIFIER" \
-    "LMSTUDIO_EMBEDDING_CONTEXT_LENGTH=$EMBEDDING_CONTEXT_LENGTH" \
-    "LMSTUDIO_EMBEDDING_DIMENSIONS=$EMBEDDING_DIMENSIONS" \
-    "LMSTUDIO_EMBEDDING_GPU=$EMBEDDING_GPU"
-}
-
-resolve_context_policy() {
-  if load_resolved_context_from_state; then
-    update_lmstudio_profile_env
-    wait_lmstudio_profile_ready "$CONTEXT_RESOLVE_TIMEOUT_SECONDS"
-    return 0
-  fi
-
-  local chat_context
-  local embedding_context
-
-  for chat_context in "${CHAT_CONTEXT_CANDIDATES[@]}"; do
-    for embedding_context in "${EMBEDDING_CONTEXT_CANDIDATES[@]}"; do
-      CHAT_CONTEXT_LENGTH="$chat_context"
-      EMBEDDING_CONTEXT_LENGTH="$embedding_context"
-      OPENCLAW_MAX_TOKENS="$(openclaw_tokens_for_context "$CHAT_CONTEXT_LENGTH")"
-
-      log "Trying context profile: chat=${CHAT_CONTEXT_LENGTH}, embedding=${EMBEDDING_CONTEXT_LENGTH}, openclaw_max=${OPENCLAW_MAX_TOKENS}"
-      update_lmstudio_profile_env
-
-      if try_wait_lmstudio_profile_ready "$CONTEXT_RESOLVE_TIMEOUT_SECONDS"; then
-        persist_resolved_context_state
-        return 0
-      fi
-
-      log "Context profile did not become ready; trying next candidate"
-    done
-  done
-
-  die "Unable to resolve a working LM Studio context profile"
-}
-
-start_download_worker() {
-  local lmstudio_container
-  lmstudio_container="$(local_lmstudio_container)"
-  if [ -z "$lmstudio_container" ]; then
-    die "LM Studio task is not running on this node; run this script on ai01"
-  fi
-
-  local download_list="/home/ai/.lmstudio/.internal/${PROFILE_WORKER_PREFIX}-downloads.txt"
-  local worker_script="/home/ai/.lmstudio/.internal/${PROFILE_WORKER_PREFIX}-background-download.sh"
-  local worker_nohup="/home/ai/.lmstudio/.internal/${PROFILE_WORKER_PREFIX}-background-download.nohup"
-
-  docker exec -i -u ai "$lmstudio_container" sh -lc \
-    "mkdir -p /home/ai/.lmstudio/.internal && cat > ${download_list}" \
-    <<DOWNLOADS
-$BACKGROUND_DOWNLOADS
-DOWNLOADS
-
-  docker exec -i -u ai "$lmstudio_container" sh -lc \
-    "cat > ${worker_script} && chmod +x ${worker_script}" \
-    <<WORKER
-#!/bin/sh
-set -eu
-
-profile_worker_prefix="${PROFILE_WORKER_PREFIX}"
-home="\${HOME:-/home/ai}"
-lms_bin="\${LMSTUDIO_SEED_HOME:-/opt/lmstudio-seed}/.lmstudio/bin/lms"
-if [ ! -x "\$lms_bin" ]; then
-  lms_bin="\$home/.lmstudio/bin/lms"
-fi
-
-list_file="\$home/.lmstudio/.internal/\${profile_worker_prefix}-downloads.txt"
-log_file="\$home/.lmstudio/.internal/\${profile_worker_prefix}-background-download.log"
-pid_file="\$home/.lmstudio/.internal/\${profile_worker_prefix}-background-download.pid"
-
-if [ -s "\$pid_file" ]; then
-  old_pid="\$(cat "\$pid_file" 2>/dev/null || true)"
-  if [ -n "\$old_pid" ] && kill -0 "\$old_pid" 2>/dev/null; then
-    printf '%s\n' "\$profile_worker_prefix background download already running as pid \$old_pid"
-    exit 0
-  fi
-fi
-
-(
-  printf '\n=== %s background model download started ===\n' "\$profile_worker_prefix"
-  date -Iseconds
-
-  while IFS= read -r raw_item; do
-    item="\$(printf '%s' "\$raw_item" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    case "\$item" in
-      ''|'#'*) continue ;;
-    esac
-
-    available_kb="\$(df -Pk "\$home" | awk 'NR==2 {print \$4}')"
-    if [ "\$available_kb" -lt "\$((20 * 1024 * 1024))" ]; then
-      printf '\n=== %s ===\nSKIP: only %s KB free, below 20GB minimum\n' "\$item" "\$available_kb"
-      continue
-    fi
-
-    printf '\n=== %s ===\n' "\$item"
-    date -Iseconds
-    if "\$lms_bin" get "\$item" -y; then
-      printf 'OK %s\n' "\$item"
-    else
-      rc="\$?"
-      printf 'FAIL rc=%s %s\n' "\$rc" "\$item"
-    fi
-    date -Iseconds
-  done < "\$list_file"
-
-  printf '\n=== %s background model download finished ===\n' "\$profile_worker_prefix"
-  date -Iseconds
-) >> "\$log_file" 2>&1 &
-
-printf '%s\n' "\$!" > "\$pid_file"
-printf '%s\n' "\$profile_worker_prefix background download started as pid \$(cat "\$pid_file"); log: \$log_file"
-WORKER
-
-  log "Starting ${PROFILE_NAME} background download worker in LM Studio container"
-  docker exec -d -u ai "$lmstudio_container" sh -lc \
-    "nohup ${worker_script} >${worker_nohup} 2>&1 &"
-}
-
 wait_replicas() {
-  local short_name="$1"
-  local expected="$2"
-  local timeout_seconds="${3:-900}"
-  local svc
-  svc="$(service_name "$short_name")"
-
-  local elapsed="0"
-  local replicas
-  while [ "$elapsed" -lt "$timeout_seconds" ]; do
-    replicas="$(docker service ls --filter "name=$svc" --format '{{.Replicas}}' | head -n 1)"
-    if [ "$replicas" = "$expected" ]; then
-      log "$svc replicas ok: $replicas"
+  local name="$1" expected="$2" timeout="${3:-900}" deadline=$(( $(date +%s) + ${3:-900} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    [ "$(docker service ls --filter "name=$(service_name "$name")" --format '{{.Replicas}}' | head -n1)" = "$expected" ] && return 0
+    sleep 10
+  done
+  die "$name did not reach expected replicas within ${timeout}s"
+}
+state_value() { [ -r "$PROFILE_CONTEXT_STATE" ] || return 1; sed -n "s/^$1=//p" "$PROFILE_CONTEXT_STATE" | tail -n1; }
+load_resolved_context_from_state() {
+  [ "$(stat -c '%u:%a' "$PROFILE_CONTEXT_STATE" 2>/dev/null || true)" = 0:600 ] || return 1
+  [ "$(state_value MODEL_FINGERPRINT || true)" = "$PROFILE_MODEL_FINGERPRINT" ] || return 1
+  local chat="$(state_value CHAT_CONTEXT_LENGTH || true)" embedding="$(state_value EMBEDDING_CONTEXT_LENGTH || true)"
+  is_array_member "$chat" "${CHAT_CONTEXT_CANDIDATES[@]}" || return 1
+  is_array_member "$embedding" "${EMBEDDING_CONTEXT_CANDIDATES[@]}" || return 1
+  CHAT_IMAGE_ID="$(state_value CHAT_IMAGE_ID || true)"
+  EMBEDDING_IMAGE_ID="$(state_value EMBEDDING_IMAGE_ID || true)"
+  [[ "$CHAT_IMAGE_ID" =~ ^sha256:[a-f0-9]{64}$ && "$EMBEDDING_IMAGE_ID" =~ ^sha256:[a-f0-9]{64}$ ]] || return 1
+  CHAT_CONTEXT_LENGTH="$chat"; EMBEDDING_CONTEXT_LENGTH="$embedding"
+  OPENCLAW_MAX_TOKENS="$(openclaw_tokens_for_context "$CHAT_CONTEXT_LENGTH")"
+}
+persist_resolved_context_state() {
+  [ ! -L "$PROFILE_STATE_DIR" ] && [ ! -L "$PROFILE_CONTEXT_STATE" ] || die "Symlink in protected model state"
+  if [ -e "$PROFILE_STATE_DIR" ]; then
+    [ "$(stat -c '%u:%a' "$PROFILE_STATE_DIR")" = 0:700 ] || die "Model state must be root-owned 0700"
+  else
+    mkdir -p "$PROFILE_STATE_DIR"; chmod 0700 "$PROFILE_STATE_DIR"
+  fi
+  local temporary="$(mktemp "${PROFILE_STATE_DIR}/context.env.XXXXXX")"
+  {
+    printf 'CHAT_CONTEXT_LENGTH=%s\nEMBEDDING_CONTEXT_LENGTH=%s\n' "$CHAT_CONTEXT_LENGTH" "$EMBEDDING_CONTEXT_LENGTH"
+    printf 'MODEL_FINGERPRINT=%s\nCHAT_IMAGE_ID=%s\nEMBEDDING_IMAGE_ID=%s\n' "$PROFILE_MODEL_FINGERPRINT" "$CHAT_IMAGE_ID" "$EMBEDDING_IMAGE_ID"
+    printf 'OPENCLAW_MAX_TOKENS=%s\n' "$OPENCLAW_MAX_TOKENS"
+  } > "$temporary"
+  chmod 0600 "$temporary"
+  mv "$temporary" "$PROFILE_CONTEXT_STATE"
+}
+deploy_native_backends() {
+  export LLAMACPP_CHAT_MODEL_ID="$CHAT_MODEL_IDENTIFIER" LLAMACPP_CHAT_MODEL_PATH="$CHAT_MODEL_PATH"
+  export LLAMACPP_CHAT_MODEL_SHA256="$CHAT_MODEL_SHA256" LLAMACPP_CHAT_CONTEXT_LENGTH="$CHAT_CONTEXT_LENGTH"
+  export LLAMACPP_CHAT_PROJECTOR_PATH="$CHAT_PROJECTOR_PATH" LLAMACPP_CHAT_PROJECTOR_SHA256="$CHAT_PROJECTOR_SHA256"
+  export LLAMACPP_EMBEDDING_MODEL_ID="$EMBEDDING_MODEL_IDENTIFIER" LLAMACPP_EMBEDDING_MODEL_PATH="$EMBEDDING_MODEL_PATH"
+  export LLAMACPP_EMBEDDING_MODEL_SHA256="$EMBEDDING_MODEL_SHA256" LLAMACPP_EMBEDDING_CONTEXT_LENGTH="$EMBEDDING_CONTEXT_LENGTH"
+  export LLAMACPP_EMBEDDING_DIMENSIONS="$EMBEDDING_DIMENSIONS" LLAMACPP_MODEL_CATALOG_FINGERPRINT="$PROFILE_MODEL_FINGERPRINT"
+  export LLAMACPP01_APPROVED_IMAGE="$CHAT_IMAGE_ID" LLAMACPP02_APPROVED_IMAGE="$EMBEDDING_IMAGE_ID"
+  bash "${CORE_DIR}/apply.sh" deploy-models --installation "$INSTALLATION_NAME" --node-name "$AI01_NODE_NAME" --accelerator amd
+  update_service_env agentgateway "AGENTGATEWAY_CHAT_MODEL_ID=$CHAT_MODEL_IDENTIFIER" "AGENTGATEWAY_EMBEDDING_MODEL_ID=$EMBEDDING_MODEL_IDENTIFIER"
+  wait_replicas llamacpp01 1/1 "$CONTEXT_RESOLVE_TIMEOUT_SECONDS"
+  wait_replicas llamacpp02 1/1 "$CONTEXT_RESOLVE_TIMEOUT_SECONDS"
+  wait_native_chat_readiness "$CONTEXT_RESOLVE_TIMEOUT_SECONDS"
+  bash "${CORE_DIR}/apply.sh" configure-model-routing --installation "$INSTALLATION_NAME" --node-name "$AI01_NODE_NAME" --accelerator amd
+}
+wait_native_chat_readiness() {
+  # Docker liveness deliberately accepts the loading state. Running replicas
+  # are therefore not inference readiness; wait for the exact startup proof
+  # under the same app UID that owns its private marker and native process.
+  local deadline=$(( $(date +%s) + ${1:-900} )) cid
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    cid="$(local_service_container llamacpp01)"
+    if [ -n "$cid" ] && docker exec --user 10000:20000 "$cid" /usr/local/bin/llamacpp-healthcheck.sh --ready >/dev/null 2>&1; then
       return 0
     fi
-
-    sleep 10
-    elapsed="$((elapsed + 10))"
+    sleep 5
   done
-
-  docker service ps "$svc" --no-trunc || true
-  die "$svc did not reach replicas $expected within ${timeout_seconds}s"
+  die "Exact native chat startup inference did not become ready"
 }
-
+wait_embedding_endpoint() {
+  local deadline=$(( $(date +%s) + ${1:-900} )) response payload
+  payload="$(jq -cn --arg model "$EMBEDDING_MODEL_IDENTIFIER" '{model:$model,input:"ai-stand embedding health check"}')"
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if response="$(curl --fail --silent --max-time 300 --header "Authorization: Bearer ${AGENTGATEWAY_OPENWEBUI_TOKEN}" \
+      --header 'Content-Type: application/json' --data "$payload" http://127.0.0.1:4000/v1/embeddings 2>/dev/null)" \
+      && printf '%s' "$response" | jq -e --argjson n "$EMBEDDING_DIMENSIONS" '.data[0].embedding | type=="array" and length==$n' >/dev/null; then return 0; fi
+    sleep 10
+  done
+  die "Exact embedding endpoint did not pass real inference"
+}
 sync_openwebui_persistent_config() {
   local openwebui_container
   openwebui_container="$(local_service_container openwebui)"
@@ -690,33 +281,8 @@ with sqlite3.connect(db_path, timeout=30) as con:
             )
             changed = True
 
-    # Open WebUI's manual OpenAI model allowlist uses wire IDs by default.
-    # Persistent base-model overrides affect labels only: Agentgateway still
-    # receives the exact original model ID for new and existing chats.
-    # GigaCode is a managed Pipe, not a static OpenAI model.  Remove only
-    # the obsolete global display override; existing conversations are left
-    # untouched and will show their historical model id.
-    if cur.execute("delete from model where id = ? and user_id is null", ("gigacode/codechat",)).rowcount:
-        changed = True
-    for model_id, display_name in ((local_model_id, local_model_display_name),):
-        row = cur.execute(
-            "select user_id, name, base_model_id, params, meta, is_active from model where id = ?",
-            (model_id,),
-        ).fetchone()
-        actual_model = None if row is None else (row[0], row[1], row[2], row[3], row[4], int(row[5]))
-        expected_model = (None, display_name, None, "{}", "{}", 1)
-        if actual_model is None:
-            cur.execute(
-                "insert into model (id, user_id, base_model_id, name, params, meta, created_at, updated_at, is_active) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (model_id, None, None, display_name, "{}", "{}", now, now, 1),
-            )
-            changed = True
-        elif actual_model != expected_model:
-            cur.execute(
-                "update model set user_id = ?, base_model_id = ?, name = ?, params = ?, meta = ?, updated_at = ?, is_active = ? where id = ?",
-                (None, None, display_name, "{}", "{}", now, 1, model_id),
-            )
-            changed = True
+    # Native model rows and read ACLs belong to model_access.py. In
+    # particular, never reset their verified administrator owner to NULL.
     con.commit()
 
 print("changed=true" if changed else "changed=false")
@@ -729,185 +295,100 @@ PY
     docker service update --force --detach=true "$(service_name openwebui)" >/dev/null
     wait_replicas openwebui 1/1 900
   fi
+  # The recurring run belongs to the controller container; this writes the configuration it reads and applies once now.
+  python3 "${CORE_DIR}/docker/openwebui/model_access_snapshot.py" --install-config --authentik-address "https://${AUTHENTIK_HOST}"
+  python3 "${CORE_DIR}/docker/openwebui/model_access_snapshot.py" --apply
 }
 
 check_openwebui_model_display_names() {
-  local openwebui_container
-  openwebui_container="$(local_service_container openwebui)"
-  [ -n "$openwebui_container" ] || die "Open WebUI task is not running on this node; run this script on ai01"
-
-  local result
-  result="$(
-    docker exec -i "$openwebui_container" python - \
-      "$CHAT_MODEL_IDENTIFIER" \
-      "$OPENWEBUI_LOCAL_MODEL_DISPLAY_NAME" <<'PY'
-import sqlite3
-import sys
-
-local_model_id, local_display_name = sys.argv[1:]
-with sqlite3.connect("/app/backend/data/webui.db", timeout=30) as con:
-    rows = {
-        model_id: con.execute(
-            "select user_id, base_model_id, name, params, meta, is_active from model where id = ?",
-            (model_id,),
-        ).fetchone()
-        for model_id in (local_model_id,)
-    }
-expected = {
-    local_model_id: (None, None, local_display_name, "{}", "{}", 1),
-}
-print("ok" if all(rows[model_id] is not None and (rows[model_id][0], rows[model_id][1], rows[model_id][2], rows[model_id][3], rows[model_id][4], int(rows[model_id][5])) == expected[model_id] for model_id in expected) else "invalid")
-PY
-  )"
-  [ "$result" = "ok" ] || die "Open WebUI model display-name override is invalid"
+  # Native ownership and ACL validation also preserves operator aliases.
+  # A read-only plan must be idempotent after the profile was applied.
+  python3 "${CORE_DIR}/docker/openwebui/model_access_snapshot.py" \
+    | jq -e '.schemaVersion == 1 and .mode == "plan" and .changed == false' >/dev/null \
+    || die "Open WebUI native model access requires reconciliation"
 }
 
+
+prepare_backend_state() {
+  require_commands
+  if [ -n "${MODEL_MIGRATION_APPROVED_CHAT_CONTEXT:-}" ]; then
+    is_array_member "$MODEL_MIGRATION_APPROVED_CHAT_CONTEXT" "${CHAT_CONTEXT_CANDIDATES[@]}" || die "Untested chat context"
+    CHAT_CONTEXT_LENGTH="$MODEL_MIGRATION_APPROVED_CHAT_CONTEXT"
+    CHAT_IMAGE_ID="${MODEL_MIGRATION_CHAT_IMAGE_ID:-}"
+    EMBEDDING_IMAGE_ID="${MODEL_MIGRATION_EMBEDDING_IMAGE_ID:-}"
+    [[ "$CHAT_IMAGE_ID" =~ ^sha256:[a-f0-9]{64}$ && "$EMBEDDING_IMAGE_ID" =~ ^sha256:[a-f0-9]{64}$ ]] || die "Passed immutable candidate images are required"
+    OPENCLAW_MAX_TOKENS="$(openclaw_tokens_for_context "$CHAT_CONTEXT_LENGTH")"
+    persist_resolved_context_state
+  else
+    load_resolved_context_from_state || die "Passed model context/images are required before activation"
+  fi
+}
+apply_backend_profile() {
+  prepare_backend_state
+  require_model_api_token
+  deploy_native_backends
+  wait_embedding_endpoint "$CONTEXT_RESOLVE_TIMEOUT_SECONDS"
+}
+apply_consumers_profile() {
+  require_commands
+  require_model_api_token
+  load_resolved_context_from_state || die "Model context/fingerprint state is not ready"
+  [[ "${MODEL_MIGRATION_GENERATION:-}" =~ ^[a-f0-9]{64}$ ]] || die "consumers-apply requires an index migration generation"
+  [ "$MODEL_MIGRATION_GENERATION" = "$PROFILE_MODEL_FINGERPRINT" ] || die "Migration generation does not match selected candidate"
+  local lancedb_path="/home/ai/.openclaw/memory/lancedb-${MODEL_MIGRATION_GENERATION:0:16}"
+  update_service_env openwebui \
+    "OPENAI_API_CONFIGS=$OPENWEBUI_OPENAI_API_CONFIGS" "OPENAI_API_KEYS=$OPENWEBUI_OPENAI_API_KEYS" \
+    "DEFAULT_MODELS=$OPENWEBUI_DEFAULT_MODELS" "RAG_EMBEDDING_MODEL=$EMBEDDING_MODEL_IDENTIFIER" \
+    "RAG_OPENAI_API_BASE_URL=http://agentgateway:4000/v1" "RAG_OPENAI_API_KEY=$AGENTGATEWAY_OPENWEBUI_TOKEN"
+  update_service_env openclaw-gateway \
+    "OPENCLAW_CHAT_MODEL_SOURCE=$CHAT_MODEL_SOURCE" "OPENCLAW_CHAT_MODEL_ID=$CHAT_MODEL_IDENTIFIER" \
+    "OPENCLAW_CHAT_CONTEXT_LENGTH=$CHAT_CONTEXT_LENGTH" "OPENCLAW_AGENTGATEWAY_BASE_URL=http://agentgateway:4000/v1" \
+    "OPENCLAW_MAX_TOKENS=$OPENCLAW_MAX_TOKENS" "OPENCLAW_CODEX_EXECUTION_PROFILE=$OPENCLAW_CODEX_EXECUTION_PROFILE" \
+    "OPENCLAW_LANCEDB_ENABLED=1" "OPENCLAW_LANCEDB_DB_PATH=$lancedb_path" \
+    "OPENCLAW_LANCEDB_EMBEDDING_MODEL=$EMBEDDING_MODEL_IDENTIFIER" "OPENCLAW_LANCEDB_EMBEDDING_DIMENSIONS=$EMBEDDING_DIMENSIONS"
+}
+consumers_ready() {
+  require_commands
+  require_model_api_token
+  local webui="${MODEL_MIGRATION_OPENWEBUI_REPLICAS:-1}" gateway="${MODEL_MIGRATION_OPENCLAW_REPLICAS:-1}"
+  case "$webui:$gateway" in 0:0|0:1|1:0|1:1) ;; *) die "Invalid consumer replicas" ;; esac
+  wait_replicas openwebui "$webui/$webui" 900
+  [ "$webui" = 0 ] || sync_openwebui_persistent_config
+  wait_replicas openclaw-gateway "$gateway/$gateway" 900
+}
 apply_profile() {
   require_commands
-
-  resolve_context_policy
-  start_download_worker
-
-  update_service_env openwebui \
-    "OPENAI_API_CONFIGS=$OPENWEBUI_OPENAI_API_CONFIGS" \
-    "OPENAI_API_KEYS=$OPENWEBUI_OPENAI_API_KEYS" \
-    "DEFAULT_MODELS=$OPENWEBUI_DEFAULT_MODELS" \
-    "RAG_EMBEDDING_MODEL=$EMBEDDING_MODEL_IDENTIFIER" \
-    "RAG_OPENAI_API_BASE_URL=http://agentgateway:4000/v1" \
-    "RAG_OPENAI_API_KEY=$AGENTGATEWAY_OPENWEBUI_TOKEN"
-
-  wait_replicas openwebui 1/1 900
-  sync_openwebui_persistent_config
-
-  update_service_env openclaw-gateway \
-    "LMSTUDIO_MODEL=$CHAT_MODEL_SOURCE" \
-    "LMSTUDIO_MODEL_IDENTIFIER=$CHAT_MODEL_IDENTIFIER" \
-    "LMSTUDIO_CONTEXT_LENGTH=$CHAT_CONTEXT_LENGTH" \
-    "OPENCLAW_MAX_TOKENS=$OPENCLAW_MAX_TOKENS" \
-    "OPENCLAW_CODEX_EXECUTION_PROFILE=$OPENCLAW_CODEX_EXECUTION_PROFILE" \
-    "OPENCLAW_AUTHENTIK_TRUSTED_PROXY_ENABLED=${OPENCLAW_AUTHENTIK_TRUSTED_PROXY_ENABLED:-0}" \
-    "OPENCLAW_TRUSTED_PROXIES=${OPENCLAW_TRUSTED_PROXIES:-127.0.0.1,::1}" \
-    "OPENCLAW_LANCEDB_ENABLED=1" \
-    "OPENCLAW_LANCEDB_EMBEDDING_MODEL=$EMBEDDING_MODEL_IDENTIFIER" \
-    "OPENCLAW_LANCEDB_EMBEDDING_DIMENSIONS=$EMBEDDING_DIMENSIONS"
-
-  remove_service_env_keys openclaw-gateway \
-    OPENCLAW_GIGACODE_ENABLED
-
-  wait_replicas openclaw-gateway 1/1 900
-
-  log "kurkin-family__labs__m01 model profile applied"
+  python3 "${CORE_DIR}/model-migration/migrate.py" --installation "$INSTALLATION_NAME" \
+    --apply-script "${INSTALLATION_DIR}/apply-model-profile.sh" --backend-url http://127.0.0.1:4000/v1 \
+    --token-file "${STORAGE_ROOT}/_secrets/agentgateway-openwebui-token" --model "$EMBEDDING_MODEL_IDENTIFIER" \
+    --dimensions "$EMBEDDING_DIMENSIONS" --generation "$PROFILE_MODEL_FINGERPRINT"
 }
-
 status_profile() {
   require_commands
-
   docker stack services "$STACK_NAME" --format 'table {{.Name}}\t{{.Replicas}}\t{{.Image}}'
-
-  local lmstudio_container
-  lmstudio_container="$(local_lmstudio_container)"
-  if [ -z "$lmstudio_container" ]; then
-    log "LM Studio task is not running on this node; run status on ai01"
-    return 0
-  fi
-
-  log "LM Studio /v1/models:"
-  docker exec -u ai "$lmstudio_container" sh -lc \
-    'curl -fsS http://127.0.0.1:${LMSTUDIO_PORT:-1234}/v1/models 2>/dev/null | jq -r ".data[]?.id" | sort || true'
-
-  log "LM Studio background download processes:"
-  docker exec -u ai "$lmstudio_container" sh -lc \
-    'ps -ef | grep -E "kurkin-family__labs__m01-background-download|m01-background-download|ai-stand-background-download|lms get" | grep -v grep || true'
-
-  log "LM Studio background download log tail:"
-  docker exec -u ai "$lmstudio_container" sh -lc \
-    'tail -n 80 /home/ai/.lmstudio/.internal/kurkin-family__labs__m01-background-download.log 2>/dev/null || tail -n 80 /home/ai/.lmstudio/.internal/m01-background-download.log 2>/dev/null || tail -n 80 /home/ai/.lmstudio/.internal/ai-stand-background-download.log 2>/dev/null || true'
 }
-
 verify_profile() {
   require_commands
-  load_resolved_context_from_state \
-    || die "Resolved context state is missing or invalid: ${PROFILE_CONTEXT_STATE}"
-
-  local svc
-  svc="$(service_name lmstudio)"
-  [ "$(current_env_value "$svc" LMSTUDIO_MODEL)" = "$CHAT_MODEL_SOURCE" ] \
-    || die "LM Studio model env is not $CHAT_MODEL_SOURCE"
-  [ "$(current_env_value "$svc" LMSTUDIO_MODEL_IDENTIFIER)" = "$CHAT_MODEL_IDENTIFIER" ] \
-    || die "LM Studio identifier env is not $CHAT_MODEL_IDENTIFIER"
-  [ "$(current_env_value "$svc" LMSTUDIO_MODEL_FORCE_CONCRETE_MODEL_IDENTIFIER)" = "$CHAT_MODEL_FORCE_CONCRETE_MODEL_IDENTIFIER" ] \
-    || die "LM Studio forced concrete model env is not $CHAT_MODEL_FORCE_CONCRETE_MODEL_IDENTIFIER"
-  [ "$(current_env_value "$svc" LMSTUDIO_MODEL_HIDE_VARIANT_FILES)" = "$CHAT_MODEL_HIDE_VARIANT_FILES" ] \
-    || die "LM Studio hidden variant env is not $CHAT_MODEL_HIDE_VARIANT_FILES"
-  [ "$(current_env_value "$svc" LMSTUDIO_CONTEXT_LENGTH)" = "$CHAT_CONTEXT_LENGTH" ] \
-    || die "LM Studio context env is not $CHAT_CONTEXT_LENGTH"
-  [ "$(current_env_value "$svc" LMSTUDIO_PARALLEL)" = "$CHAT_PARALLEL" ] \
-    || die "LM Studio parallel env is not $CHAT_PARALLEL"
-  [ "$(current_env_value "$svc" LMSTUDIO_EMBEDDING_MODEL)" = "$EMBEDDING_MODEL_SOURCE" ] \
-    || die "LM Studio embedding model env is not $EMBEDDING_MODEL_SOURCE"
-  [ "$(current_env_value "$svc" LMSTUDIO_EMBEDDING_MODEL_KEY)" = "$EMBEDDING_MODEL_KEY" ] \
-    || die "LM Studio embedding key env is not $EMBEDDING_MODEL_KEY"
-  [ "$(current_env_value "$svc" LMSTUDIO_EMBEDDING_MODEL_IDENTIFIER)" = "$EMBEDDING_MODEL_IDENTIFIER" ] \
-    || die "LM Studio embedding identifier env is not $EMBEDDING_MODEL_IDENTIFIER"
-  [ "$(current_env_value "$svc" LMSTUDIO_EMBEDDING_CONTEXT_LENGTH)" = "$EMBEDDING_CONTEXT_LENGTH" ] \
-    || die "LM Studio embedding context env is not $EMBEDDING_CONTEXT_LENGTH"
-  [ "$(current_env_value "$svc" LMSTUDIO_EMBEDDING_DIMENSIONS)" = "$EMBEDDING_DIMENSIONS" ] \
-    || die "LM Studio embedding dimensions env is not $EMBEDDING_DIMENSIONS"
-  [ "$(current_env_value "$svc" LMSTUDIO_EMBEDDING_GPU)" = "$EMBEDDING_GPU" ] \
-    || die "LM Studio embedding GPU env is not $EMBEDDING_GPU"
-
-  svc="$(service_name openwebui)"
-  [ "$(current_env_value "$svc" OPENAI_API_CONFIGS)" = "$OPENWEBUI_OPENAI_API_CONFIGS" ] \
-    || die "Open WebUI model list does not match m01 profile"
-  # Open WebUI's own outbound Authorization bearer comes from this separate
-  # flat var, not from OPENAI_API_CONFIGS's embedded api_key (confirmed live
-  # 2026-09-11 against its routers/openai.py) - a stale value here 401s every
-  # chat request against agentgateway silently, so this must be verified on
-  # its own, not assumed to follow from OPENAI_API_CONFIGS matching above.
-  [ "$(current_env_value "$svc" OPENAI_API_KEYS)" = "$OPENWEBUI_OPENAI_API_KEYS" ] \
-    || die "Open WebUI API key env does not match m01 profile"
-  [ "$(current_env_value "$svc" DEFAULT_MODELS)" = "$OPENWEBUI_DEFAULT_MODELS" ] \
-    || die "Open WebUI default models env is not $OPENWEBUI_DEFAULT_MODELS"
-  [ "$(current_env_value "$svc" RAG_EMBEDDING_MODEL)" = "$EMBEDDING_MODEL_IDENTIFIER" ] \
-    || die "Open WebUI RAG embedding model env is not $EMBEDDING_MODEL_IDENTIFIER"
-
-  svc="$(service_name openclaw-gateway)"
-  [ "$(current_env_value "$svc" LMSTUDIO_MODEL)" = "$CHAT_MODEL_SOURCE" ] \
-    || die "OpenClaw LM Studio model env is not $CHAT_MODEL_SOURCE"
-  [ "$(current_env_value "$svc" LMSTUDIO_MODEL_IDENTIFIER)" = "$CHAT_MODEL_IDENTIFIER" ] \
-    || die "OpenClaw LM Studio identifier env is not $CHAT_MODEL_IDENTIFIER"
-  [ "$(current_env_value "$svc" LMSTUDIO_CONTEXT_LENGTH)" = "$CHAT_CONTEXT_LENGTH" ] \
-    || die "OpenClaw LM Studio context env is not $CHAT_CONTEXT_LENGTH"
-  [ "$(current_env_value "$svc" OPENCLAW_MAX_TOKENS)" = "$OPENCLAW_MAX_TOKENS" ] \
-    || die "OpenClaw max tokens env is not $OPENCLAW_MAX_TOKENS"
-  [ "$(current_env_value "$svc" OPENCLAW_CODEX_EXECUTION_PROFILE)" = "$OPENCLAW_CODEX_EXECUTION_PROFILE" ] \
-    || die "OpenClaw Codex execution profile is not $OPENCLAW_CODEX_EXECUTION_PROFILE"
-  ! has_env_key "$svc" OPENCLAW_GIGACODE_ENABLED \
-    || die "Legacy static OpenClaw GigaCode provider must be absent"
-  [ "$(current_env_value "$svc" OPENCLAW_LANCEDB_ENABLED)" = "1" ] \
-    || die "OpenClaw LanceDB is not enabled"
-  [ "$(current_env_value "$svc" OPENCLAW_LANCEDB_EMBEDDING_MODEL)" = "$EMBEDDING_MODEL_IDENTIFIER" ] \
-    || die "OpenClaw LanceDB embedding model env is not $EMBEDDING_MODEL_IDENTIFIER"
-  [ "$(current_env_value "$svc" OPENCLAW_LANCEDB_EMBEDDING_DIMENSIONS)" = "$EMBEDDING_DIMENSIONS" ] \
-    || die "OpenClaw LanceDB dimensions env is not $EMBEDDING_DIMENSIONS"
-
-  wait_replicas lmstudio 1/1 30
-  wait_replicas openwebui 1/1 30
-  wait_replicas openclaw-gateway 1/1 30
+  require_model_api_token
+  load_resolved_context_from_state || die "Protected model generation is missing"
+  local role svc image expected
+  for role in chat embedding; do
+    if [ "$role" = chat ]; then svc="$(service_name llamacpp01)"; image="$CHAT_IMAGE_ID"; expected="$CHAT_MODEL_SHA256"; else svc="$(service_name llamacpp02)"; image="$EMBEDDING_IMAGE_ID"; expected="$EMBEDDING_MODEL_SHA256"; fi
+    [ "$(docker service inspect "$svc" | jq -r '.[0].Spec.TaskTemplate.ContainerSpec.Image')" = "$image" ] || die "Backend image differs from passed canary"
+    [ "$(current_env_value "$svc" LLAMACPP_MODEL_SHA256)" = "$expected" ] || die "Backend weight checksum differs"
+    [ "$(current_env_value "$svc" LLAMACPP_REQUIRE_GPU)" = 1 ] || die "ROCm-only contract is absent"
+    [ "$(current_env_value "$svc" LLAMACPP_MODEL_CATALOG_FINGERPRINT)" = "$PROFILE_MODEL_FINGERPRINT" ] || die "Backend generation differs"
+  done
+  [ "$(current_env_value "$(service_name openclaw-gateway)" OPENCLAW_LANCEDB_DB_PATH)" = "/home/ai/.openclaw/memory/lancedb-${PROFILE_MODEL_FINGERPRINT:0:16}" ] || die "LanceDB generation differs"
+  wait_embedding_endpoint 300
   check_openwebui_model_display_names
-
-  log "kurkin-family__labs__m01 model profile verify ok"
 }
-
 main() {
-  local command_name="${1:-}"
-  case "$command_name" in
-    apply) apply_profile ;;
-    status) status_profile ;;
-    verify) verify_profile ;;
-    -h|--help|help|'') usage ;;
-    *) usage >&2; die "Unknown command: $command_name" ;;
+  case "${1:-}" in
+    apply) apply_profile ;; prepare-backend-state) prepare_backend_state ;; backend-apply) apply_backend_profile ;;
+    consumers-apply) apply_consumers_profile ;; consumers-ready) consumers_ready ;;
+    status) status_profile ;; verify) verify_profile ;;
+    -h|--help|help|'') usage ;; *) die "Unknown command: $1" ;;
   esac
 }
-
 main "$@"

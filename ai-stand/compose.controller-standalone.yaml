@@ -1,0 +1,10 @@
+# Networks for deploying compose.controller.yaml ALONE into the existing stack (`apply.sh deploy-controller`).
+#
+# A generic `deploy` merges compose.controller.yaml with compose.yaml, which defines the overlay networks. Deployed on its
+# own, the file needs them referenced as external; the two files are only ever combined with each other, never with
+# compose.yaml (an external network cannot be merged with the definition in compose.yaml).
+
+networks:
+  ai-core:
+    external: true
+    name: ${STACK_NAME:-ai-stand}_ai-core

@@ -1,0 +1,17 @@
+[Unit]
+Description=Reload nginx after the ai-stand TLS lineage changed and record the certificate it serves
+After=nginx.service
+# A renewal swaps several links in a burst; do not let the burst trip the start-rate limit.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+# Let the burst of changes settle, then make sure nginx would accept the result before touching the running master.
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/sbin/nginx -t
+ExecStart=/usr/bin/systemctl reload nginx
+# Record the fingerprint of the certificate nginx now presents. The containers that installed the lineage cannot reach
+# the host's nginx; they wait for this record to match (certbot/served.sh). @PROBE_HOST@ must be a name nginx serves
+# on this node (the default server rejects unknown SNI). Only a match proves the reload took effect,
+# so the loop polls for up to 20 s and records whatever nginx serves at the end. ($$ and %% are systemd escapes.)
+ExecStart=/bin/sh -c 'want=$$(openssl x509 -in @CERTBOT_DATA@/live/@CERT_DOMAIN@/fullchain.pem -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2); for i in 1 2 3 4 5 6 7 8 9 10; do fp=$$(echo | openssl s_client -connect 127.0.0.1:443 -servername @PROBE_HOST@ 2>/dev/null | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2); [ -n "$$fp" ] && [ "$$fp" = "$$want" ] && break; sleep 2; done; [ -n "$$fp" ] && echo "$$fp" > @CERTBOT_DATA@/.served-fingerprint.tmp && mv -f @CERTBOT_DATA@/.served-fingerprint.tmp @CERTBOT_DATA@/.served-fingerprint'

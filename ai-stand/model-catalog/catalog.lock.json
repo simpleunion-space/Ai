@@ -1,0 +1,349 @@
+{
+  "version": 1,
+  "runtime": {
+    "commit": "d81235049384534c167caea52b85a694f6103d14",
+    "tag": "v0.6.0",
+    "archiveSha256": "6b58785f0a82898f4c3442417ff962e2d4b231b1bee5d033902ad90b27901e14"
+  },
+  "active": {
+    "chat": {
+      "model": "qwen/qwen3.8-27b",
+      "quantization": "Q4_K_M"
+    },
+    "embedding": {
+      "model": "qwen3-embedding-8b",
+      "quantization": "Q4_K_M"
+    }
+  },
+  "quantizer": {
+    "commit": "d775ebf363f777bc862a8659b6c55eec9419cf35",
+    "tag": "b11337",
+    "archiveSha256": "292e7c6cadac3faf23ca3dc3c29cd2e6482b027ff1dd198aa1dc88592f3d40e4",
+    "image": "ai-stand-model-quantizer:b11337"
+  },
+  "auxiliaryArtifacts": [
+    {
+      "kind": "projector",
+      "model": "qwen/qwen3.8-27b",
+      "role": "chat",
+      "quantization": "BF16",
+      "path": "lmstudio-community/Qwen3.8-27B-GGUF/mmproj-Qwen3.8-27B-BF16.gguf",
+      "sha256": "97ba9d70e7407f08c880def231fd360a312c76d0053387733f10dcf6affd75a1",
+      "size": 931145856,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3.8-27B-GGUF",
+        "revision": "5a7da681f60570ab5b439a587e912d2e5eddb582",
+        "file": "mmproj-Qwen3.8-27B-BF16.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3.8-27B-GGUF/resolve/5a7da681f60570ab5b439a587e912d2e5eddb582/mmproj-Qwen3.8-27B-BF16.gguf"
+      }
+    }
+  ],
+  "artifacts": [
+    {
+      "model": "qwen/qwen3.8-27b",
+      "role": "chat",
+      "quantization": "Q4_K_M",
+      "path": "lmstudio-community/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf",
+      "sha256": "e00082f779fa385cee8c68a3ec8833a75778cc87272240b942f74e0b8243e520",
+      "size": 16810714336,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3.8-27B-GGUF",
+        "revision": "5a7da681f60570ab5b439a587e912d2e5eddb582",
+        "file": "Qwen3.8-27B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3.8-27B-GGUF/resolve/5a7da681f60570ab5b439a587e912d2e5eddb582/Qwen3.8-27B-Q4_K_M.gguf"
+      }
+    },
+    {
+      "model": "qwen/qwen3.8-27b",
+      "role": "chat",
+      "quantization": "Q8_0",
+      "path": "lmstudio-community/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q8_0.gguf",
+      "sha256": "f0fc43cfd802bd87bc7b95f2120553a6407848e3229126b623cc397427857e8a",
+      "size": 29047084256,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3.8-27B-GGUF",
+        "revision": "5a7da681f60570ab5b439a587e912d2e5eddb582",
+        "file": "Qwen3.8-27B-Q8_0.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3.8-27B-GGUF/resolve/5a7da681f60570ab5b439a587e912d2e5eddb582/Qwen3.8-27B-Q8_0.gguf"
+      }
+    },
+    {
+      "model": "qwen/qwen3.6-35b-a3b",
+      "role": "chat",
+      "quantization": "Q4_K_M",
+      "path": "lmstudio-community/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q4_K_M.gguf",
+      "sha256": "4ac6a06bce551257267f49ad2226f8671a22519ccc1a4dde9d5b433d1f2a410d",
+      "size": 21166757728,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3.6-35B-A3B-GGUF",
+        "revision": "68a34855558af61cbef0324d31f411be8a506b08",
+        "file": "Qwen3.6-35B-A3B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-GGUF/resolve/68a34855558af61cbef0324d31f411be8a506b08/Qwen3.6-35B-A3B-Q4_K_M.gguf"
+      }
+    },
+    {
+      "model": "qwen/qwen3.6-35b-a3b",
+      "role": "chat",
+      "quantization": "Q8_0",
+      "path": "lmstudio-community/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-Q8_0.gguf",
+      "sha256": "e56476632cf65ab1a32c135aead9eba4278f3bd3eb0499aa74304566d6e27d5b",
+      "size": 36903139168,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3.6-35B-A3B-GGUF",
+        "revision": "68a34855558af61cbef0324d31f411be8a506b08",
+        "file": "Qwen3.6-35B-A3B-Q8_0.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3.6-35B-A3B-GGUF/resolve/68a34855558af61cbef0324d31f411be8a506b08/Qwen3.6-35B-A3B-Q8_0.gguf"
+      }
+    },
+    {
+      "model": "qwen/qwen3.6-27b",
+      "role": "chat",
+      "quantization": "Q4_K_M",
+      "path": "lmstudio-community/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf",
+      "sha256": "33625d8dc3a5dd8d88c324d47db58561b11f7072816287078bfe58b4c55782f9",
+      "size": 16547398784,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3.6-27B-GGUF",
+        "revision": "58c6607d9c4cae8b071b3781c73be633fb3dee36",
+        "file": "Qwen3.6-27B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3.6-27B-GGUF/resolve/58c6607d9c4cae8b071b3781c73be633fb3dee36/Qwen3.6-27B-Q4_K_M.gguf"
+      }
+    },
+    {
+      "model": "qwen/qwen3.6-27b",
+      "role": "chat",
+      "quantization": "Q8_0",
+      "path": "lmstudio-community/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q8_0.gguf",
+      "sha256": "f14d6609f87c63784efaa256cf84f876d633d718a56ad15b8153114c162accda",
+      "size": 28595762304,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3.6-27B-GGUF",
+        "revision": "58c6607d9c4cae8b071b3781c73be633fb3dee36",
+        "file": "Qwen3.6-27B-Q8_0.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3.6-27B-GGUF/resolve/58c6607d9c4cae8b071b3781c73be633fb3dee36/Qwen3.6-27B-Q8_0.gguf"
+      }
+    },
+    {
+      "model": "qwen/qwen3.5-9b",
+      "role": "chat",
+      "quantization": "Q4_K_M",
+      "path": "lmstudio-community/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf",
+      "sha256": "cd76ec205963b3b33350093e6904d9de16c4e666fd104e1f632d25c7f15f2a13",
+      "size": 5627044256,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3.5-9B-GGUF",
+        "revision": "1379f25c6b505a3fc737bd7818cb09389cf807c1",
+        "file": "Qwen3.5-9B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3.5-9B-GGUF/resolve/1379f25c6b505a3fc737bd7818cb09389cf807c1/Qwen3.5-9B-Q4_K_M.gguf"
+      }
+    },
+    {
+      "model": "qwen/qwen3.5-9b",
+      "role": "chat",
+      "quantization": "Q8_0",
+      "path": "lmstudio-community/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q8_0.gguf",
+      "sha256": "096a84703a334662086e4b46b6a4dd896bad10a46f67cd84a53cfe1420b24717",
+      "size": 9527501216,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3.5-9B-GGUF",
+        "revision": "1379f25c6b505a3fc737bd7818cb09389cf807c1",
+        "file": "Qwen3.5-9B-Q8_0.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3.5-9B-GGUF/resolve/1379f25c6b505a3fc737bd7818cb09389cf807c1/Qwen3.5-9B-Q8_0.gguf"
+      }
+    },
+    {
+      "model": "qwen/qwen3-8b",
+      "role": "chat",
+      "quantization": "Q4_K_M",
+      "path": "lmstudio-community/Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf",
+      "sha256": "a7676d257b10f3ce23aedba45e64ba61a5aa295f0009d87c5627f6c026a8f35f",
+      "size": 5027783968,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3-8B-GGUF",
+        "revision": "07ebe812301319d9947477e3a94ab8aa587bb3af",
+        "file": "Qwen3-8B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3-8B-GGUF/resolve/07ebe812301319d9947477e3a94ab8aa587bb3af/Qwen3-8B-Q4_K_M.gguf"
+      }
+    },
+    {
+      "model": "qwen/qwen3-8b",
+      "role": "chat",
+      "quantization": "Q8_0",
+      "path": "lmstudio-community/Qwen3-8B-GGUF/Qwen3-8B-Q8_0.gguf",
+      "sha256": "60f232fbbdb88a363f4b483337a4ad3986784ccd4ecf1f1839bbed600a415f01",
+      "size": 8709518624,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3-8B-GGUF",
+        "revision": "07ebe812301319d9947477e3a94ab8aa587bb3af",
+        "file": "Qwen3-8B-Q8_0.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3-8B-GGUF/resolve/07ebe812301319d9947477e3a94ab8aa587bb3af/Qwen3-8B-Q8_0.gguf"
+      }
+    },
+    {
+      "model": "qwen/qwen3-4b",
+      "role": "chat",
+      "quantization": "Q4_K_M",
+      "path": "lmstudio-community/Qwen3-4B-GGUF/Qwen3-4B-Q4_K_M.gguf",
+      "sha256": "d0c2ac093a77c402f2ddc23a64f68b7c70cfef151899b33e3a6066247104ced3",
+      "size": 2497280704,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3-4B-GGUF",
+        "revision": "aaffcf9c16d545f8a889846b98676ddf359aa9e9",
+        "file": "Qwen3-4B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3-4B-GGUF/resolve/aaffcf9c16d545f8a889846b98676ddf359aa9e9/Qwen3-4B-Q4_K_M.gguf"
+      }
+    },
+    {
+      "model": "qwen/qwen3-4b",
+      "role": "chat",
+      "quantization": "Q8_0",
+      "path": "lmstudio-community/Qwen3-4B-GGUF/Qwen3-4B-Q8_0.gguf",
+      "sha256": "d76023a1bcbefe1a4b8a1619eacc6a8c299efc905b711c01a654998a9a5f74bc",
+      "size": 4280405184,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3-4B-GGUF",
+        "revision": "aaffcf9c16d545f8a889846b98676ddf359aa9e9",
+        "file": "Qwen3-4B-Q8_0.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3-4B-GGUF/resolve/aaffcf9c16d545f8a889846b98676ddf359aa9e9/Qwen3-4B-Q8_0.gguf"
+      }
+    },
+    {
+      "model": "qwen/qwen3-1.7b",
+      "role": "chat",
+      "quantization": "Q4_K_M",
+      "path": "lmstudio-community/Qwen3-1.7B-GGUF/Qwen3-1.7B-Q4_K_M.gguf",
+      "sha256": "e0801cbda7e2f3fd00bea4d73b53b422b14b13aa130e778f6414b6b641920b7e",
+      "size": 1282439328,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3-1.7B-GGUF",
+        "revision": "e5e31bf4d96de5da2ce124fa86673f0be7c82346",
+        "file": "Qwen3-1.7B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3-1.7B-GGUF/resolve/e5e31bf4d96de5da2ce124fa86673f0be7c82346/Qwen3-1.7B-Q4_K_M.gguf"
+      }
+    },
+    {
+      "model": "qwen/qwen3-1.7b",
+      "role": "chat",
+      "quantization": "Q8_0",
+      "path": "lmstudio-community/Qwen3-1.7B-GGUF/Qwen3-1.7B-Q8_0.gguf",
+      "sha256": "eaf3c2bedbd50a31e1ea12d2c3fe2915b76d387f6928b0663870f36effa9c1fb",
+      "size": 2165039264,
+      "source": {
+        "type": "huggingface",
+        "repo": "lmstudio-community/Qwen3-1.7B-GGUF",
+        "revision": "e5e31bf4d96de5da2ce124fa86673f0be7c82346",
+        "file": "Qwen3-1.7B-Q8_0.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3-1.7B-GGUF/resolve/e5e31bf4d96de5da2ce124fa86673f0be7c82346/Qwen3-1.7B-Q8_0.gguf"
+      }
+    },
+    {
+      "model": "qwen3-embedding-0.6b",
+      "role": "embedding",
+      "quantization": "Q4_K_M",
+      "path": "Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q4_K_M.gguf",
+      "sha256": "470901844f8cb73a3e0479ea1dd57ad1baba7072481f1897b2dc4b132b9051a7",
+      "size": 396474560,
+      "source": {
+        "type": "quantized",
+        "input": {
+          "repo": "Qwen/Qwen3-Embedding-0.6B-GGUF",
+          "revision": "370f27d7550e0def9b39c1f16d3fbaa13aa67728",
+          "file": "Qwen3-Embedding-0.6B-f16.gguf",
+          "url": "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/370f27d7550e0def9b39c1f16d3fbaa13aa67728/Qwen3-Embedding-0.6B-f16.gguf",
+          "sha256": "421a27e58d165478cc7acb984a688c2aa41404968b0203e7cd743ece44c54340",
+          "size": 1197629632
+        },
+        "quantizerCommit": "d775ebf363f777bc862a8659b6c55eec9419cf35"
+      }
+    },
+    {
+      "model": "qwen3-embedding-0.6b",
+      "role": "embedding",
+      "quantization": "Q8_0",
+      "path": "Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
+      "sha256": "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439",
+      "size": 639150592,
+      "source": {
+        "type": "huggingface",
+        "repo": "Qwen/Qwen3-Embedding-0.6B-GGUF",
+        "revision": "370f27d7550e0def9b39c1f16d3fbaa13aa67728",
+        "file": "Qwen3-Embedding-0.6B-Q8_0.gguf",
+        "url": "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/370f27d7550e0def9b39c1f16d3fbaa13aa67728/Qwen3-Embedding-0.6B-Q8_0.gguf"
+      }
+    },
+    {
+      "model": "qwen3-embedding-4b",
+      "role": "embedding",
+      "quantization": "Q4_K_M",
+      "path": "Qwen/Qwen3-Embedding-4B-GGUF/Qwen3-Embedding-4B-Q4_K_M.gguf",
+      "sha256": "2b0cf8f17b4c723c27303015383c27ec4bf2d8314bb677d05e920dd70bb0f16b",
+      "size": 2496703776,
+      "source": {
+        "type": "huggingface",
+        "repo": "Qwen/Qwen3-Embedding-4B-GGUF",
+        "revision": "f4602530db1d980e16da9d7d3a70294cf5c190be",
+        "file": "Qwen3-Embedding-4B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/resolve/f4602530db1d980e16da9d7d3a70294cf5c190be/Qwen3-Embedding-4B-Q4_K_M.gguf"
+      }
+    },
+    {
+      "model": "qwen3-embedding-4b",
+      "role": "embedding",
+      "quantization": "Q8_0",
+      "path": "Qwen/Qwen3-Embedding-4B-GGUF/Qwen3-Embedding-4B-Q8_0.gguf",
+      "sha256": "b60ae5ce2dd6a0b77f82cadf21def1f310a3e10cde380ad0081b07a9d416949d",
+      "size": 4279660224,
+      "source": {
+        "type": "huggingface",
+        "repo": "Qwen/Qwen3-Embedding-4B-GGUF",
+        "revision": "f4602530db1d980e16da9d7d3a70294cf5c190be",
+        "file": "Qwen3-Embedding-4B-Q8_0.gguf",
+        "url": "https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/resolve/f4602530db1d980e16da9d7d3a70294cf5c190be/Qwen3-Embedding-4B-Q8_0.gguf"
+      }
+    },
+    {
+      "model": "qwen3-embedding-8b",
+      "role": "embedding",
+      "quantization": "Q4_K_M",
+      "path": "Qwen/Qwen3-Embedding-8B-GGUF/Qwen3-Embedding-8B-Q4_K_M.gguf",
+      "sha256": "3fcd3febec8b3fd64435204db75bf0dd73b91e8d0661e0331acfe7e7c3120b85",
+      "size": 4676804928,
+      "source": {
+        "type": "huggingface",
+        "repo": "Qwen/Qwen3-Embedding-8B-GGUF",
+        "revision": "69d0e58a13e463cd99a9b83e3f5fee7c10265fab",
+        "file": "Qwen3-Embedding-8B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/Qwen/Qwen3-Embedding-8B-GGUF/resolve/69d0e58a13e463cd99a9b83e3f5fee7c10265fab/Qwen3-Embedding-8B-Q4_K_M.gguf"
+      }
+    },
+    {
+      "model": "qwen3-embedding-8b",
+      "role": "embedding",
+      "quantization": "Q8_0",
+      "path": "Qwen/Qwen3-Embedding-8B-GGUF/Qwen3-Embedding-8B-Q8_0.gguf",
+      "sha256": "d20ddc71e8a5c4344f2343481e242233a997dc5eaff442427a945836c97b4deb",
+      "size": 8047105824,
+      "source": {
+        "type": "huggingface",
+        "repo": "Qwen/Qwen3-Embedding-8B-GGUF",
+        "revision": "69d0e58a13e463cd99a9b83e3f5fee7c10265fab",
+        "file": "Qwen3-Embedding-8B-Q8_0.gguf",
+        "url": "https://huggingface.co/Qwen/Qwen3-Embedding-8B-GGUF/resolve/69d0e58a13e463cd99a9b83e3f5fee7c10265fab/Qwen3-Embedding-8B-Q8_0.gguf"
+      }
+    }
+  ]
+}

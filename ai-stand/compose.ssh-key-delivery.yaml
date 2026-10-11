@@ -1,0 +1,168 @@
+# Optional delivery of each member's personal SSH private key (an Authentik attribute) to their Coder workspaces
+# (docker/ssh-key-delivery).
+#
+# Like compose.gitea-ssh-sync.yaml this file is NEVER combined with compose.yaml: its Authentik credential is issued by a
+# running Authentik and a Docker secret can neither exist before that nor be edited afterwards. `apply.sh
+# configure-ssh-key-delivery` issues the credentials, creates the secrets and deploys this file on its own into the
+# existing stack; a generic `deploy` does not list the services, and `docker stack deploy` without --prune leaves them
+# alone. Because the file is deployed alone, the overlay network is referenced as external.
+#
+# ssh-key-sender (the Authentik node) reads the private-key attributes and PUTs the desired set to ssh-key-receiver (the
+# Coder node) over the encrypted overlay. The receiver holds no Authentik credential; it writes one 0700 directory per
+# member under SSH_KEYS_ROOT, which the Coder templates bind-mount read-only into that member's workspaces only.
+
+services:
+  ssh-key-sender:
+    image: ${SSH_KEY_DELIVERY_IMAGE:?SSH_KEY_DELIVERY_IMAGE is required}
+    command: ["push"]
+    user: "10000:20000"
+    read_only: true
+    environment:
+      AUTHENTIK_URL: http://authentik:9000
+      AUTHENTIK_TOKEN_FILE: /run/secrets/ai-stand-ssh-key-delivery-authentik-token
+      DELIVERY_URL: http://ssh-key-receiver:8444
+      DELIVERY_TOKEN_FILE: /run/secrets/ai-stand-ssh-key-delivery-token
+      SYNC_INTERVAL_SECONDS: "60"
+      # name=Authentik account of each service whose dedicated key is delivered (not a person; see the README).
+      SERVICE_KEYS: ${SSH_SERVICE_ACCOUNTS:-}
+      TZ: "${IM_TZ:?IM_TZ is required}"
+    secrets:
+      - source: ai-stand-ssh-key-delivery-authentik-token
+        target: ai-stand-ssh-key-delivery-authentik-token
+        uid: "10000"
+        gid: "20000"
+        mode: 0400
+      - source: ai-stand-ssh-key-delivery-token
+        target: ai-stand-ssh-key-delivery-token
+        uid: "10000"
+        gid: "20000"
+        mode: 0400
+    volumes:
+      - type: tmpfs
+        target: /tmp
+    networks:
+      - ai-core
+    cap_drop:
+      - ALL
+    stop_grace_period: 10s
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/python3
+        - /opt/ssh-key-delivery/delivery.py
+        - healthcheck
+        - --for
+        - push
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.authentik == true
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+      restart_policy:
+        condition: any
+        delay: 15s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 1m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 1m
+        order: stop-first
+
+  ssh-key-receiver:
+    image: ${SSH_KEY_DELIVERY_IMAGE:?SSH_KEY_DELIVERY_IMAGE is required}
+    command: ["serve"]
+    # The identity of the workspace user (docker/coder-workspace-*): the files it writes are owned by the account that
+    # must read them, so they can stay mode 0400 and need no capability.
+    user: "10000:20000"
+    read_only: true
+    environment:
+      KEYS_ROOT: /srv/user-ssh-keys
+      SERVICE_KEYS_ROOT: /srv/service-ssh-keys
+      # The only service names this receiver accepts; anything else the sender sends is refused.
+      SERVICE_NAMES: ${SSH_KEY_DELIVERY_SERVICE_NAMES:-}
+      DELIVERY_TOKEN_FILE: /run/secrets/ai-stand-ssh-key-delivery-token
+      LISTEN_PORT: "8444"
+      TZ: "${IM_TZ:?IM_TZ is required}"
+    secrets:
+      - source: ai-stand-ssh-key-delivery-token
+        target: ai-stand-ssh-key-delivery-token
+        uid: "10000"
+        gid: "20000"
+        mode: 0400
+    volumes:
+      - type: bind
+        source: ${SSH_KEYS_ROOT:?SSH_KEYS_ROOT is required}
+        target: /srv/user-ssh-keys
+      - type: bind
+        source: ${SSH_SERVICE_KEYS_ROOT:?SSH_SERVICE_KEYS_ROOT is required}
+        target: /srv/service-ssh-keys
+      - type: tmpfs
+        target: /tmp
+    networks:
+      ai-core:
+        aliases:
+          - ssh-key-receiver
+    cap_drop:
+      - ALL
+    stop_grace_period: 10s
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/python3
+        - /opt/ssh-key-delivery/delivery.py
+        - healthcheck
+        - --for
+        - serve
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.coder == true
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+      restart_policy:
+        condition: any
+        delay: 15s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 30s
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 30s
+        order: stop-first
+
+networks:
+  ai-core:
+    external: true
+    name: ${STACK_NAME:-ai-stand}_ai-core
+
+secrets:
+  ai-stand-ssh-key-delivery-authentik-token:
+    external: true
+  ai-stand-ssh-key-delivery-token:
+    external: true

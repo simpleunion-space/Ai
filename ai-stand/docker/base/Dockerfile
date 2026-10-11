@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -46,10 +46,10 @@ RUN existing_group="$(getent group 1000 | cut -d: -f1)" \
 COPY --chmod=0755 docker/base/entrypoint.sh /usr/local/bin/ai-entrypoint.sh
 
 ENV HOME=/home/ai \
-    PATH=/home/ai/.local/bin:/home/ai/.lmstudio/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PATH=/home/ai/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
     IM_UID=1000 \
     IM_GID=1000 \
-    IM_TZ=Europe/Moscow
+    IM_TZ=UTC
 
 WORKDIR /home/ai
 

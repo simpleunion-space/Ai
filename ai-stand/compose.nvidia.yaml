@@ -1,15 +1,26 @@
 services:
-  lmstudio:
-    image: ghcr.io/kukurusik/ai-stand-lmstudio:2026.09.12-1-nvidia
+  llamacpp01:
+    image: ${LLAMACPP01_RUNTIME_IMAGE:?LLAMACPP01_RUNTIME_IMAGE is required}
     environment:
-      LMSTUDIO_ACCELERATOR: nvidia
-      LMSTUDIO_GPU: max
-      LMSTUDIO_RUNTIME_ID: llama.cpp-linux-x86_64-nvidia-cuda-avx2
-      LMSTUDIO_RUNTIME_MANIFEST: /opt/lmstudio-runtime-manifests/nvidia
-      LMSTUDIO_RUNTIME_PROFILE: nvidia
+      LLAMACPP_ACCELERATOR: nvidia
+      LLAMACPP_GPU_LAYERS: all
+      LLAMACPP_REQUIRE_GPU: "1"
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
       NVIDIA_VISIBLE_DEVICES: all
     deploy:
       placement:
         constraints:
-          - node.labels.ai-stand.accelerator == nvidia
+          - node.labels.ai-stand.llamacpp01 == true
+
+  llamacpp02:
+    image: ${LLAMACPP02_RUNTIME_IMAGE:?LLAMACPP02_RUNTIME_IMAGE is required}
+    environment:
+      LLAMACPP_ACCELERATOR: nvidia
+      LLAMACPP_GPU_LAYERS: all
+      LLAMACPP_REQUIRE_GPU: "1"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      NVIDIA_VISIBLE_DEVICES: all
+    deploy:
+      placement:
+        constraints:
+          - node.labels.ai-stand.llamacpp02 == true

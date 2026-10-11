@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { lstatSync, readFileSync } from "node:fs";
+import { managedCodexAppServer, optionalConfigResult, subscriptionCatalog, subscriptionConfigUpdates } from "./subscription-models.mjs";
 
 function required(name) {
   const value = process.env[name]?.trim();
@@ -90,15 +92,25 @@ function unsetConfig(path) {
   const result = spawnSync("openclaw", ["config", "unset", path], {
     cwd: process.env.HOME,
     env: process.env,
-    stdio: "inherit",
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
   });
   if (result.error) throw result.error;
-  // `config unset` is idempotent in the pinned OpenClaw CLI. A non-zero
-  // result indicates an actual invalid configuration/path and must stop the
-  // deployment rather than leave a retired static subscription provider live.
+  // OpenClaw 2026.9 returns non-zero for an already-absent path.  Treat only
+  // that documented condition as an idempotent no-op; every other failure
+  // still stops deployment rather than leaving retired Docker settings live.
   if (result.status !== 0) {
-    throw new Error(`OpenClaw config unset failed: ${path}`);
+    const detail = `${result.stdout || ""}\n${result.stderr || ""}`;
+    if (detail.includes("Config path not found")) return;
+    throw new Error(`OpenClaw config unset failed: ${path}: ${detail.trim()}`);
   }
+}
+
+function optionalConfig(path) {
+  const result = spawnSync("openclaw", ["config", "get", path, "--json"], {
+    cwd: process.env.HOME, env: process.env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  });
+  return optionalConfigResult(path, result);
 }
 
 function isEnabled(name) {
@@ -107,10 +119,10 @@ function isEnabled(name) {
 
 // API-key profiles are a higher-priority credential source than the managed
 // provider config below. A previous profile with the old agentgateway token
-// made OpenClaw send a 401 even though models.providers.lmstudio.apiKey had
+// made OpenClaw send a 401 even though models.providers.agentgateway.apiKey had
 // already been updated. Remove only this local provider's profiles; OAuth or
 // API-key profiles for every other provider remain untouched.
-function clearLmstudioAuthProfiles() {
+function clearAgentgatewayAuthProfiles() {
   const listed = runCliJson(["models", "auth", "list", "--agent", "main", "--json"]);
   const profiles = Array.isArray(listed) ? listed : listed?.profiles;
   if (!Array.isArray(profiles)) {
@@ -118,39 +130,23 @@ function clearLmstudioAuthProfiles() {
   }
 
   for (const profile of profiles) {
-    if (profile?.provider !== "lmstudio" || typeof profile.id !== "string" || profile.id === "") continue;
+    if (profile?.provider !== "agentgateway" || typeof profile.id !== "string" || profile.id === "") continue;
     runCli(["models", "auth", "logout", "--agent", "main", "--yes", profile.id]);
   }
 }
 
-const modelId = required("LMSTUDIO_MODEL_IDENTIFIER");
-const sourceModel = required("LMSTUDIO_MODEL");
-const contextWindow = positiveInteger("LMSTUDIO_CONTEXT_LENGTH");
+const modelId = required("OPENCLAW_CHAT_MODEL_ID");
+const sourceModel = required("OPENCLAW_CHAT_MODEL_SOURCE");
+const contextWindow = positiveInteger("OPENCLAW_CHAT_CONTEXT_LENGTH");
 const maxTokens = positiveInteger("OPENCLAW_MAX_TOKENS");
-const baseUrl = required("OPENCLAW_LMSTUDIO_BASE_URL");
+const baseUrl = required("OPENCLAW_AGENTGATEWAY_BASE_URL");
 const providerTimeoutSeconds = positiveInteger("OPENCLAW_PROVIDER_TIMEOUT_SECONDS");
 const agentgatewayToken = required("AGENTGATEWAY_TOKEN");
 const authentikTrustedProxyEnabled = isEnabled("OPENCLAW_AUTHENTIK_TRUSTED_PROXY_ENABLED");
 const gatewayToken = authentikTrustedProxyEnabled ? null : required("OPENCLAW_GATEWAY_TOKEN");
 const publicOrigin = new URL(required("OPENCLAW_PUBLIC_ORIGIN"));
 const trustedProxies = optionalList("OPENCLAW_TRUSTED_PROXIES");
-const modelRef = `lmstudio/${modelId}`;
-const gigacodeEnabled = isEnabled("OPENCLAW_GIGACODE_SUBSCRIPTION_ENABLED");
-const gigacodeModelId = gigacodeEnabled ? required("OPENCLAW_GIGACODE_MODEL_ID") : null;
-const gigacodeDisplayName = gigacodeEnabled ? required("OPENCLAW_GIGACODE_DISPLAY_NAME") : null;
-const gigacodeContextWindow = gigacodeEnabled ? positiveInteger("OPENCLAW_GIGACODE_CONTEXT_WINDOW") : null;
-const gigacodeAdapterBaseUrl = gigacodeEnabled
-  ? new URL(required("OPENCLAW_GIGACODE_ADAPTER_BASE_URL"))
-  : null;
-const gigacodeAdapterBearer = gigacodeEnabled ? required("OPENCLAW_GIGACODE_ADAPTER_BEARER") : null;
-const gigacodeTelegramSubjectMapPath = gigacodeEnabled
-  ? required("OPENCLAW_GIGACODE_TELEGRAM_SUBJECT_MAP_FILE")
-  : null;
-// The bridge's public model ID intentionally includes a slash. OpenClaw
-// identifies the provider with the first segment only and sends the complete
-// model ID to agentgateway, where the explicit gigacode/codechat route is
-// evaluated before the local LM Studio wildcard.
-const gigacodeModelRef = gigacodeEnabled ? `gigacode/${gigacodeModelId}` : null;
+const modelRef = `agentgateway/${modelId}`;
 const readonlyMcpEnabled = isEnabled("OPENCLAW_READONLY_MCP_ENABLED");
 const readonlyMcpBaseUrl = readonlyMcpEnabled ? new URL(required("OPENCLAW_READONLY_MCP_BASE_URL")) : null;
 const readonlyMcpPathPrefix = readonlyMcpEnabled
@@ -175,12 +171,12 @@ const lancedb = lancedbEnabled
   : null;
 
 if (maxTokens >= contextWindow) {
-  throw new Error("OPENCLAW_MAX_TOKENS must be smaller than LMSTUDIO_CONTEXT_LENGTH");
+  throw new Error("OPENCLAW_MAX_TOKENS must be smaller than OPENCLAW_CHAT_CONTEXT_LENGTH");
 }
 
 // The check above only rejects the degenerate case - it enforces no actual
 // safety MARGIN for input/history. The only real backstop is
-// installations/kurkin-family__labs__m01/apply-model-profile.sh's own
+// the installation's apply-model-profile.sh and its own
 // divisor/floor/cap policy (1/4 of context, following a real 2026-09-06 OOM
 // incident where a stale session's oversized maxTokens left almost no
 // margin) - that policy is installation-specific, so a different/future
@@ -191,7 +187,7 @@ if (maxTokens >= contextWindow) {
 // clearly dangerous configuration reaching this file directly.
 if (maxTokens > contextWindow / 2) {
   throw new Error(
-    `OPENCLAW_MAX_TOKENS (${maxTokens}) leaves too little of LMSTUDIO_CONTEXT_LENGTH (${contextWindow}) for input/history - keep it at or below half of the context window`,
+    `OPENCLAW_MAX_TOKENS (${maxTokens}) leaves too little of OPENCLAW_CHAT_CONTEXT_LENGTH (${contextWindow}) for input/history - keep it at or below half of the context window`,
   );
 }
 
@@ -207,15 +203,6 @@ if (readonlyMcpBaseUrl && readonlyMcpBaseUrl.protocol !== "https:") {
   throw new Error("OPENCLAW_READONLY_MCP_BASE_URL must be an HTTPS origin");
 }
 
-if (gigacodeAdapterBaseUrl && (
-  gigacodeAdapterBaseUrl.protocol !== "http:" ||
-  gigacodeAdapterBaseUrl.pathname !== "/v1" ||
-  gigacodeAdapterBaseUrl.search ||
-  gigacodeAdapterBaseUrl.hash
-)) {
-  throw new Error("OPENCLAW_GIGACODE_ADAPTER_BASE_URL must be an internal HTTP /v1 origin");
-}
-
 if (!/^\/mcp\/[a-z][a-z0-9-]{0,62}$/.test(readonlyMcpPathPrefix)) {
   throw new Error("OPENCLAW_READONLY_MCP_PATH_PREFIX must match /mcp/<lowercase-slug>");
 }
@@ -223,15 +210,23 @@ if (!/^\/mcp\/[a-z][a-z0-9-]{0,62}$/.test(readonlyMcpPathPrefix)) {
 const provider = {
   baseUrl,
   apiKey: agentgatewayToken,
-  api: "openai-responses",
-  // The model lifecycle is owned by LM Studio/model-apply. Do not probe its
+  // Agentgateway advertises the local Agentgateway backend as Chat
+  // Completions, not as a full Responses implementation. In particular,
+  // an OpenClaw transcript can contain its own role-less `compaction`
+  // records; the Responses adapter forwards those raw records into
+  // `input`, which Agentgateway correctly rejects as an invalid InputParam.
+  // The Chat Completions adapter serializes ordinary conversation messages
+  // instead, preserving the existing Agentgateway -> llama.cpp path and its
+  // tool-call handling.
+  api: "openai-completions",
+  // The model lifecycle is owned by Agentgateway/model-apply. Do not probe its
   // non-OpenAI /api/v1/models preload endpoint through agentgateway.
   params: { preload: false },
   timeoutSeconds: providerTimeoutSeconds,
   models: [
     {
       id: modelId,
-      name: `${sourceModel} via LM Studio`,
+      name: modelId,
       reasoning: true,
       input: ["text", "image"],
       cost: {
@@ -242,37 +237,22 @@ const provider = {
       },
       contextWindow,
       maxTokens,
+      // Without this block OpenClaw sends NO reasoning control to the backend
+      // at any thinking level (verified by capturing real requests), so /think
+      // did nothing and the model always thought at the template default.
+      // Qwen3.8's chat template accepts exactly four reasoning_effort values -
+      // none, low, medium and xhigh (its default); minimal, high and max make
+      // llama.cpp answer HTTP 500 ("Unexpected reasoning effort"). So: expose
+      // those, and map the OpenClaw labels onto them. "off" has to be mapped
+      // explicitly, otherwise nothing is sent and thinking stays on.
+      compat: {
+        supportsReasoningEffort: true,
+        supportedReasoningEfforts: ["none", "low", "medium", "xhigh"],
+        reasoningEffortMap: { off: "none", minimal: "low", high: "xhigh", max: "xhigh" },
+      },
     },
   ],
 };
-
-const gigacodeProvider = gigacodeEnabled
-  ? {
-      // This is a local ai02 adapter, not Agentgateway and not GigaCode.
-      // The adapter proves an authenticated requester before it obtains a
-      // short-lived broker JWT for a single personal Agentgateway route.
-      baseUrl: gigacodeAdapterBaseUrl.toString().replace(/\/$/, ""),
-      apiKey: gigacodeAdapterBearer,
-      api: "openai-responses",
-      timeoutSeconds: providerTimeoutSeconds,
-      models: [
-        {
-          id: gigacodeModelId,
-          name: gigacodeDisplayName,
-          reasoning: true,
-          input: ["text", "image"],
-          cost: {
-            input: 0,
-            output: 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-          },
-          contextWindow: gigacodeContextWindow,
-          maxTokens: Math.min(maxTokens, Math.floor(gigacodeContextWindow / 2)),
-        },
-      ],
-    }
-  : null;
 
 // OpenClaw's Codex harness otherwise chooses its own implicit mode from the
 // local runtime requirements. Be explicit: a profile must never silently
@@ -280,7 +260,7 @@ const gigacodeProvider = gigacodeEnabled
 // approval request that a long-running tool turn cannot answer. The generic
 // profile remains Guardian; an installation has to opt in to autonomous
 // Codex execution deliberately.
-const codexAppServer =
+const codexExecutionPolicy =
   codexExecutionProfile === "autonomous"
     ? {
         mode: "yolo",
@@ -295,6 +275,12 @@ const codexAppServer =
         approvalsReviewer: "auto_review",
       };
 
+const codexAppServer = managedCodexAppServer(
+  optionalConfig("plugins.entries.codex.config.appServer"),
+  codexExecutionPolicy,
+  required("OPENCLAW_CODEX_APP_SERVER_BIN"),
+);
+
 // `plugins.entries.codex.config.appServer` controls the managed Codex
 // harness, but OpenClaw's native exec tool has an independent, central
 // policy. Leaving the latter unset lets a runtime/session choose Guardian
@@ -303,7 +289,8 @@ const codexAppServer =
 // deployments retain Guardian's normalized `auto` mode, while an
 // installation opting into autonomous Codex execution gets `full` without
 // the interpreter-inline approval override. Do not set `host` here: its
-// default `auto` continues to select the Docker sandbox configured below.
+// default `auto` lets the explicitly configured Docker sandbox backend govern
+// non-main execution below.
 const execPolicy =
   codexExecutionProfile === "autonomous"
     ? { mode: "full", strictInlineEval: false }
@@ -336,7 +323,7 @@ const gatewayAuth = authentikTrustedProxyEnabled
       allowTailscale: false,
     };
 
-clearLmstudioAuthProfiles();
+clearAgentgatewayAuthProfiles();
 
 setConfig("gateway.mode", JSON.stringify("local"), ["--strict-json"]);
 // Kept in sync by hand with entrypoint.sh's own `--bind lan` CLI flag on
@@ -365,17 +352,17 @@ setConfig("models.mode", JSON.stringify("merge"), ["--strict-json"]);
 // above is always a complete, self-sufficient object for the CURRENT model
 // only. --merge on an array/map path appends by id/key instead of
 // replacing - across repeated model switches this silently accumulated one
-// stale entry per former default model in models.providers.lmstudio.models
+// stale entry per former default model in models.providers.agentgateway.models
 // and agents.defaults.models, each still carrying whatever
 // contextWindow/maxTokens applied when IT was current. A pre-existing
 // OpenClaw session pinned to one of those old entries could still
-// successfully request that model by name, forcing LM Studio to load it
+// successfully request that model by name, forcing Agentgateway to load it
 // alongside the current one - two large models sharing this host's fixed
 // VRAM aperture is what caused a real kernel OOM on 2026-09-06 (see
 // project_ai_stand_openclaw_jit_oom_incident memory notes). Every other
 // setConfig call in this file already omits --merge and is confirmed (via
 // live `cat openclaw.json`) to fully replace at its path with no
-// accumulation. models.providers.lmstudio behaves the same way with plain
+// accumulation. models.providers.agentgateway behaves the same way with plain
 // --strict-json. agents.defaults.models is treated by openclaw's CLI as a
 // "protected" path, though - confirmed live: omitting --merge there made
 // the container crash-loop with "Refusing to replace agents.defaults.models
@@ -383,45 +370,30 @@ setConfig("models.mode", JSON.stringify("merge"), ["--strict-json"]);
 // intentionally", so it needs --replace instead to get the same
 // full-replace behavior without silently re-merging the old entries back.
 // sensitive=true: provider now embeds a real agentgateway bearer token
-// (previously the harmless constant "lmstudio"), so keep it out of a
+// (previously the harmless constant "agentgateway"), so keep it out of a
 // thrown-error message the way gatewayToken already is below.
-setConfig("models.providers.lmstudio", JSON.stringify(provider), ["--strict-json"], { sensitive: true });
-if (gigacodeProvider) {
-  // This provider ends at the local ai02 adapter. The adapter accepts only
-  // an opaque session record produced by the version-pinned requester
-  // plugin, then obtains a short-lived subject JWT for one Agentgateway
-  // route. No shared machine token can address a subscription backend.
-  setConfig("models.providers.gigacode", JSON.stringify(gigacodeProvider), ["--strict-json"], { sensitive: true });
-} else {
-  // GigaCode is now a personal subscription path.  Remove a provider written
-  // by earlier m01 profiles so a static machine token cannot keep invoking a
-  // former shared bridge after the personal adapter is enabled.
-  unsetConfig("models.providers.gigacode");
-}
-if (gigacodeEnabled) {
-  setConfig(
-    "plugins.entries.ai-stand-gigacode-requester",
-    JSON.stringify({
-      enabled: true,
-      hooks: { allowConversationAccess: true },
-      config: {
-        sessionMapPath: "/home/ai/.openclaw/gigacode-requester/sessions.json",
-        telegramSubjectMapPath: gigacodeTelegramSubjectMapPath,
-      },
-    }),
-    ["--strict-json"],
-  );
-} else {
-  unsetConfig("plugins.entries.ai-stand-gigacode-requester");
-}
+setConfig("models.providers.agentgateway", JSON.stringify(provider), ["--strict-json"], { sensitive: true });
 setConfig("agents.defaults.model.primary", JSON.stringify(modelRef), ["--strict-json"]);
+// With the reasoning map above a session that never chose a level would start at
+// "medium"; the local model used to think at its template default (xhigh). Keep
+// that, and let people lower it per session with /think.
+setConfig("agents.defaults.thinkingDefault", JSON.stringify("xhigh"), ["--strict-json"]);
 const selectableModels = { [modelRef]: { alias: "Local Qwen" } };
-if (gigacodeModelRef) {
-  selectableModels[gigacodeModelRef] = { alias: gigacodeDisplayName };
+const subscriptions = subscriptionConfigUpdates({
+  providers: Object.fromEntries(Object.values(subscriptionCatalog.agents).map(({ provider }) =>
+    [provider, optionalConfig(`models.providers.${provider}`)])),
+  agents: Object.fromEntries(Object.keys(subscriptionCatalog.agents).map((agent) =>
+    [agent, optionalConfig(`agents.entries.${agent}`)])),
+  selectableModels,
+});
+for (const [path, value] of subscriptions.updates) {
+  setConfig(path, JSON.stringify(value), ["--strict-json", ...(path.endsWith(".models") ? ["--replace"] : [])], {
+    sensitive: path.startsWith("models.providers."),
+  });
 }
 setConfig(
   "agents.defaults.models",
-  JSON.stringify(selectableModels),
+  JSON.stringify(subscriptions.selectableModels),
   ["--strict-json", "--replace"],
 );
 // agents.defaults.modelPolicy.allow is OpenClaw's actual allowlist for
@@ -437,13 +409,21 @@ setConfig(
 // current default. Re-deriving it from modelRef on every container start,
 // the same way as agents.defaults.model.primary above, keeps it in lockstep
 // with whatever model this container is actually configured for instead of
-// accumulating history. A single exact ref (not a "lmstudio/*" wildcard)
-// matches this installation's own intent: only the current profiled model
-// should be selectable, not every model LM Studio happens to have
-// available.
+// accumulating history. Keep exact refs rather than provider wildcards. The
+// subscription catalog adds native Codex/Claude selections, not additional
+// local GPU backends.
 setConfig(
   "agents.defaults.modelPolicy.allow",
-  JSON.stringify(gigacodeModelRef ? [modelRef, gigacodeModelRef] : [modelRef]),
+  JSON.stringify(subscriptions.allowedModels),
+  ["--strict-json"],
+);
+// The default list above is what every agent inherits, but the Codex and Claude runtimes belong to their own agents:
+// their sign-ins are stored per agent (Claude's setup-token only in `claude`), so main would offer models it cannot
+// run and the picker marks the provider "login required". The agent main works with the local model only, exactly as
+// codex and claude each list only their own models (subscriptionConfigUpdates).
+setConfig(
+  "agents.entries.main.modelPolicy",
+  JSON.stringify({ ...optionalConfig("agents.entries.main.modelPolicy"), allow: [modelRef] }),
   ["--strict-json"],
 );
 
@@ -467,22 +447,165 @@ if (readonlyMcpBaseUrl) {
     jiraReadonly: `${readonlyMcpPathPrefix}/jira-readonly-mcp`,
     confluenceReadonly: `${readonlyMcpPathPrefix}/confluence-readonly-mcp`,
     imapReadonly: `${readonlyMcpPathPrefix}/imap-readonly-mcp`,
-    personalMcp: "/mcp/personal",
   })) {
     setConfig(`mcp.servers.${name}`, JSON.stringify(remoteMcp(path)), ["--strict-json"]);
   }
+  // "Personal MCP" lived on MetaMCP, which was removed on 2026-10-23; drop the
+  // entry an older init left in openclaw.json.
+  unsetConfig("mcp.servers.personalMcp");
 }
 
+// Telegram: who may talk to the bot, and where. Everything comes from Authentik through the read-only MCP reconciler, which
+// apply.sh passes on as variables: the people (OPENCLAW_TELEGRAM_ALLOW_FROM, a JSON array of the numeric ids in their
+// ai_stand_telegram_user_id attribute), the bot's owner (OPENCLAW_TELEGRAM_OWNER_IDS, the same attribute of the Telegram
+// owner account) and the groups with their topics (OPENCLAW_TELEGRAM_GROUPS, a JSON object from that account's
+// ai_stand_telegram_groups attribute). Ids kept by hand in the gateway's own state directory are added for anyone without
+// an Authentik account. The bot token is the one thing Authentik does not hold: it is read from TELEGRAM_TOKEN_FILE, which
+// apply.sh installs from the host's secret storage.
+//
+// With OPENCLAW_TELEGRAM_GROUPS set, this block writes the whole channel (token file, policies, groups and topics, the
+// binding to the main agent, the owner); a group missing from the variable is removed, a fresh installation needs nothing
+// by hand. Without it, only the allowlists of an already configured channel are updated, as they always were.
+const TELEGRAM_FIXED_IDS_FILE = `${process.env.HOME}/.openclaw/telegram-static-allow-from.json`;
+const TELEGRAM_TOKEN_FILE = `${process.env.HOME}/.openclaw/telegram-bot-token`;
+const TELEGRAM_GROUP_ID = /^-[1-9][0-9]{4,19}$/;
+const TELEGRAM_TOPIC_ID = /^(?:[1-9][0-9]{0,9}|\*)$/;
+const TELEGRAM_AGENT_ID = /^[a-z][a-z0-9_-]{0,31}$/;
+const TELEGRAM_DEFAULT_AGENT = "main";
+
+function telegramIds(raw, label) {
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { throw new Error(`${label} must be a JSON array of Telegram user ids`); }
+  if (!Array.isArray(parsed)) throw new Error(`${label} must be a JSON array of Telegram user ids`);
+  return parsed.map((value) => {
+    const text = String(value).trim();
+    if (!/^[1-9][0-9]{4,14}$/.test(text)) throw new Error(`${label} holds an invalid Telegram user id`);
+    return text;
+  });
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// {"<group id>": {"requireMention": true, "topics": {"<topic id>": "<agent id>"}}} -> the entries of channels.telegram.groups
+// without their allowFrom. Anything outside that shape stops the start: a half-read list could drop a group silently.
+function telegramGroups(raw) {
+  const label = "OPENCLAW_TELEGRAM_GROUPS";
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { throw new Error(`${label} must be a JSON object`); }
+  if (!isPlainObject(parsed)) throw new Error(`${label} must be a JSON object`);
+  const groups = {};
+  for (const [groupId, group] of Object.entries(parsed)) {
+    if (!TELEGRAM_GROUP_ID.test(groupId) || !isPlainObject(group)) throw new Error(`${label} holds an invalid group`);
+    if (Object.keys(group).some((key) => key !== "requireMention" && key !== "topics")) {
+      throw new Error(`${label} holds an unknown group setting`);
+    }
+    const requireMention = group.requireMention ?? true;
+    const topics = group.topics ?? {};
+    if (typeof requireMention !== "boolean" || !isPlainObject(topics)) throw new Error(`${label} holds an invalid group`);
+    const entry = { requireMention, groupPolicy: "allowlist" };
+    for (const [topicId, agentId] of Object.entries(topics)) {
+      if (!TELEGRAM_TOPIC_ID.test(topicId) || typeof agentId !== "string" || !TELEGRAM_AGENT_ID.test(agentId)) {
+        throw new Error(`${label} holds an invalid topic`);
+      }
+      entry.topics = { ...entry.topics, [topicId]: { agentId } };
+    }
+    groups[groupId] = entry;
+  }
+  return groups;
+}
+
+function telegramTokenFilePresent() {
+  try {
+    const status = lstatSync(TELEGRAM_TOKEN_FILE);
+    return status.isFile() && status.size > 0;
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+const telegramAllowEnv = process.env.OPENCLAW_TELEGRAM_ALLOW_FROM?.trim();
+const telegramOwnerEnv = process.env.OPENCLAW_TELEGRAM_OWNER_IDS?.trim();
+const telegramGroupsEnv = process.env.OPENCLAW_TELEGRAM_GROUPS?.trim();
+if (telegramAllowEnv || telegramGroupsEnv) {
+  const telegram = optionalConfig("channels.telegram") ?? {};
+  const owners = telegramOwnerEnv ? telegramIds(telegramOwnerEnv, "OPENCLAW_TELEGRAM_OWNER_IDS") : [];
+  const wantedGroups = telegramGroupsEnv ? telegramGroups(telegramGroupsEnv) : null;
+  const tokenFile = telegramTokenFilePresent();
+  // A managed channel needs a token (the file, or one an earlier setup left in the config); without one it stays as it is.
+  const configured = Object.keys(telegram).length > 0;
+  if (wantedGroups && !tokenFile && !telegram.botToken) {
+    console.warn(`[openclaw] Telegram groups are configured but there is no bot token (${TELEGRAM_TOKEN_FILE}); the channel stays off`);
+  } else if (wantedGroups || configured) {
+    let fixedIds = [];
+    try {
+      fixedIds = telegramIds(readFileSync(TELEGRAM_FIXED_IDS_FILE, "utf8"), TELEGRAM_FIXED_IDS_FILE);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    const people = telegramAllowEnv ? telegramIds(telegramAllowEnv, "OPENCLAW_TELEGRAM_ALLOW_FROM") : [];
+    const allowed = [...new Set([...fixedIds, ...people, ...owners])].sort();
+    const strict = ["--strict-json"];
+    if (wantedGroups) {
+      setConfig("channels.telegram.enabled", JSON.stringify(true), strict);
+      if (tokenFile) {
+        setConfig("channels.telegram.tokenFile", JSON.stringify(TELEGRAM_TOKEN_FILE), strict);
+        unsetConfig("channels.telegram.botToken");
+      }
+      setConfig("channels.telegram.dmPolicy", JSON.stringify("disabled"), strict);
+      setConfig("channels.telegram.groupPolicy", JSON.stringify("allowlist"), strict);
+      const groups = Object.fromEntries(Object.entries(wantedGroups).map(([id, group]) => [id, { ...group, allowFrom: allowed }]));
+      setConfig("channels.telegram.groups", JSON.stringify(groups), strict);
+      // Every Telegram chat goes to the main agent unless a topic names another one. Bindings of other channels stay.
+      const bindings = optionalConfig("bindings");
+      const isOurs = (binding) => binding?.match?.channel === "telegram" && binding.match.accountId === "*" && !binding.type;
+      const kept = Array.isArray(bindings) ? bindings.filter((binding) => !isOurs(binding)) : [];
+      kept.push({ agentId: TELEGRAM_DEFAULT_AGENT, match: { channel: "telegram", accountId: "*" } });
+      setConfig("bindings", JSON.stringify(kept), strict);
+    } else {
+      for (const groupId of Object.keys(telegram.groups ?? {})) {
+        setConfig(`channels.telegram.groups.${groupId}.allowFrom`, JSON.stringify(allowed), strict);
+      }
+    }
+    setConfig("channels.telegram.allowFrom", JSON.stringify(allowed), strict);
+    setConfig("channels.telegram.groupAllowFrom", JSON.stringify(allowed), strict);
+    // Slash commands (/status, /model, ...): once commands.ownerAllowFrom names an owner, an allowlisted sender who is not
+    // an owner may use only /new and /reset. commands.allowFrom makes the same list the command authorization source, so
+    // every member the bot talks to may also use ordinary commands. Owner-only commands (/config, /restart, /update,
+    // exec approvals, ...) are for commands.ownerAllowFrom, the Telegram owner account's own id; owners of other
+    // channels stay as they are.
+    setConfig("commands.allowFrom", JSON.stringify({ telegram: allowed }), strict);
+    if (owners.length > 0) {
+      const current = optionalConfig("commands.ownerAllowFrom");
+      const others = Array.isArray(current) ? current.filter((entry) => !String(entry).startsWith("telegram:")) : [];
+      setConfig("commands.ownerAllowFrom", JSON.stringify([...others, ...owners.map((id) => `telegram:${id}`)]), strict);
+    }
+    console.log(`[openclaw] Telegram set for ${allowed.length} user id(s), ${owners.length} owner(s)${wantedGroups ? `, ${Object.keys(wantedGroups).length} group(s)` : ""}`);
+  }
+}
+
+// LM Studio is gone from this stand (llama.cpp behind Agentgateway replaced it).
+// Its provider plugin ships inside OpenClaw and cannot be uninstalled, only
+// disabled; an older init had enabled it.
+setConfig("plugins.entries.lmstudio.enabled", JSON.stringify(false), ["--strict-json"]);
+unsetConfig("plugins.entries.lmstudio.config");
+
 // The Codex binary is a managed OpenClaw harness process inside this same
-// container, not a separate ai-stand service. The yolo preset does not grant
-// host Docker access: openclaw-gateway has no docker.sock and its Docker CLI
-// is already pinned through DOCKER_HOST to openclaw-sandbox-dind.
+// container, not a separate ai-stand service. Its execution profile does not
+// grant a raw host socket: sandboxed tool work reaches Docker only through
+// the private, least-privilege socket proxy declared in compose.yaml.
 setConfig("plugins.entries.codex.enabled", JSON.stringify(true), ["--strict-json"]);
 setConfig(
   "plugins.entries.codex.config.appServer",
   JSON.stringify(codexAppServer),
   ["--strict-json"],
+  { sensitive: true },
 );
+// Session discovery is independent of model availability and stays disabled.
+setConfig("plugins.entries.codex.config.sessionCatalog.enabled", JSON.stringify(false), ["--strict-json"]);
+setConfig("plugins.entries.anthropic.config.sessionCatalog.enabled", JSON.stringify(false), ["--strict-json"]);
 
 if (lancedb) {
   // Only one plugin can own the memory slot. Replacing memory-core prevents
@@ -504,25 +627,47 @@ if (lancedb) {
   setConfig("memory.search.enabled", JSON.stringify(true), ["--strict-json"]);
 }
 
-// Docker-backed sandbox isolation: DOCKER_HOST (set in compose.yaml's
-// x-openclaw-environment) points the docker CLI/SDK this backend uses at
-// the isolated openclaw-sandbox-dind sidecar, not the host's real Docker -
-// openclaw-gateway itself has no docker.sock, no docker binary, and a
-// hardened capability set (see compose.yaml). "non-main" sandboxes spawned/
-// tool-use work but leaves the primary chat session unsandboxed, the least
-// disruptive default; "all" is available if that's ever wanted instead.
-// prune keeps old sandbox containers from accumulating forever in the
-// isolated dind's own storage.
+// Docker-out-of-Docker sandbox isolation.  The Gateway sees a private socket
+// proxy over DOCKER_HOST, never the raw host socket.  The proxy and Gateway
+// are co-located on ai02; Docker can therefore inspect the Gateway and reuse
+// this narrowly mounted persistent workspace root in sibling sandbox
+// containers. Scope=agent keeps Main, Codex and Claude workspaces separate.
 setConfig("agents.defaults.sandbox.mode", JSON.stringify("non-main"), ["--strict-json"]);
 setConfig("agents.defaults.sandbox.backend", JSON.stringify("docker"), ["--strict-json"]);
 setConfig("agents.defaults.sandbox.scope", JSON.stringify("agent"), ["--strict-json"]);
 setConfig("agents.defaults.sandbox.workspaceAccess", JSON.stringify("none"), ["--strict-json"]);
-setConfig("agents.defaults.sandbox.workspaceRoot", JSON.stringify("~/.openclaw/sandboxes"), ["--strict-json"]);
+setConfig("agents.defaults.sandbox.browser.enabled", JSON.stringify(false), ["--strict-json"]);
+setConfig(
+  "agents.defaults.sandbox.workspaceRoot",
+  JSON.stringify("/home/ai/.openclaw/sandboxes"),
+  ["--strict-json"],
+);
+setConfig(
+  "agents.defaults.sandbox.docker",
+  JSON.stringify({
+    image: "openclaw-sandbox:bookworm-slim",
+    containerPrefix: "openclaw-sbx-",
+    network: "none",
+    user: "10000:20000",
+  }),
+  ["--strict-json"],
+);
 setConfig(
   "agents.defaults.sandbox.prune",
   JSON.stringify({ idleHours: 24, maxAgeDays: 7 }),
   ["--strict-json"],
 );
+unsetConfig("agents.defaults.sandbox.ssh");
+for (const agentId of ["main", "codex", "claude"]) {
+  // Keep the persisted bind source separate for every trusted agent.  The
+  // Docker backend will create session workspaces below this agent root.
+  setConfig(
+    `agents.entries.${agentId}.sandbox.workspaceRoot`,
+    JSON.stringify(`/home/ai/.openclaw/sandboxes/${agentId}`),
+    ["--strict-json"],
+  );
+  unsetConfig(`agents.entries.${agentId}.sandbox.ssh`);
+}
 
 runCli(["config", "validate"]);
 

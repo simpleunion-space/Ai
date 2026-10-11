@@ -11,7 +11,7 @@
 # "$" for exactly that reason; this also means a var can be substituted
 # mid-string, not just as a whole scalar value - see logging.database.url
 # below). compose.yaml defines syntactically-valid, NON-empty placeholders
-# for all nine (an empty string parses as YAML null
+# for every one of them (an empty string parses as YAML null
 # for a required String field and crashes agentgateway just as fast -
 # confirmed live 2026-09-11, see compose.yaml's own comment on this exact
 # env block) so the very first boot never sees an unset OR null var; real
@@ -30,6 +30,24 @@
 config:
   storage:
     mode: readOnly
+  # Who a request is attributed to in request_logs / the Analytics page
+  # (agentgateway_user, agentgateway_group). Three sources, checked in this
+  # order:
+  #   1. a person's own JWT (OpenCode and other direct clients, see
+  #      llm.policies.jwtAuth): the email claim, the sub claim when the
+  #      account has no email, group ai-users;
+  #   2. the openwebui service key: Open WebUI forwards the signed-in
+  #      person's email (ENABLE_FORWARD_USER_INFO_HEADERS in compose.yaml);
+  #      that header is trusted ONLY on a request that authenticated with the
+  #      openwebui key, so no other client can pick the user name it is
+  #      accounted under (verified: a JWT or openclaw request carrying the
+  #      header is still accounted under its own identity);
+  #   3. any other service key (openclaw, coder): the key's own name.
+  # The header test is spelled with the in operator on purpose: the has
+  # macro is rejected on request.headers by agentgateway 1.6.
+  standardAttributes:
+    user: 'has(jwt.sub) ? (has(jwt.email) && jwt.email != "" ? jwt.email : jwt.sub) : (apiKey.name == "openwebui" && "x-openwebui-user-email" in request.headers ? request.headers["x-openwebui-user-email"] : apiKey.name)'
+    group: 'has(jwt.sub) ? "ai-users" : apiKey.name'
   # Backs the Analytics/Logs pages in agentgateway's own ui: console
   # ("request log database is not configured" otherwise - confirmed
   # against agentgateway's published JSON schema, under RawLogging in its
@@ -59,35 +77,82 @@ gateways:
   default:
     port: 4000
 
-# The single model surface for every consumer (OpenWebUI/OpenClaw). Local
-# models front lmstudio-proxy, not LM Studio directly, so every caller
-# inherits its tool-call compatibility fixes. An opted-in installation also
-# adds a per-subscription GigaCode bridge: it owns the CLI-specific device protocol,
-# while agentgateway sees only a normal OpenAI-compatible upstream. Claude
-# Code and ChatGPT subscription auth still remain outside agentgateway.
+# The single model surface for every consumer (OpenWebUI/OpenClaw).  Chat and
+# embedding requests have separate explicit providers that talk straight to
+# the llama.cpp servers on the closed ai-models-backend network; native tool
+# calls and streaming pass through without payload rewriting, and the explicit
+# model list below is the allow-list.
+# Claude Code and ChatGPT subscription auth remain outside agentgateway.
 llm:
   providers:
-    - name: lmstudio
-      provider: openAI
-      params:
-        baseUrl: http://lmstudio-proxy:11234/v1
-        # LM Studio's OpenAI-compatible server does not check this value: it
-        # accepts any non-empty bearer, matching the placeholder OpenWebUI
-        # already uses when talking to LM Studio directly today.
-        apiKey: lmstudio
-  models:
-    - name: "*"
+    - name: local-chat
+      # Agentgateway 1.6 reserves the openAI provider for OpenAI itself.
+      # The chat backend only serves Chat Completions. Omitting Responses
+      # preserves extended-thinking history when Messages traffic is
+      # converted upstream.
       provider:
-        reference: lmstudio
-  # Machine-to-machine access for the three services that call this surface
-  # directly. There is no browser/human traffic here (humans go through
-  # OpenWebUI's own already-OIDC-gated chat UI, which then calls this API
-  # with its own service token) - a static per-service bearer key is the
-  # least machinery that actually fits, and is a straight drop-in for the
-  # `api_key` field every OpenAI-compatible client here already has.
+        custom:
+          formats:
+            - type: completions
+      params:
+        baseUrl: http://llamacpp01:1234/v1
+        # Internal model network only; external client bearer is not forwarded.
+        apiKey: local
+    - name: local-embeddings
+      provider:
+        custom:
+          formats:
+            - type: embeddings
+      params:
+        baseUrl: http://llamacpp02:1234/v1
+        apiKey: local
+  models:
+    # Do not use a wildcard: only the installation-profiled chat model and
+    # embedding model are exposed through Agentgateway. Other downloaded
+    # weights remain node-local inventory until a future profile publishes
+    # them deliberately.
+    - name: $AGENTGATEWAY_CHAT_MODEL_ID
+      provider:
+        reference: local-chat
+    - name: $AGENTGATEWAY_EMBEDDING_MODEL_ID
+      provider:
+        reference: local-embeddings
+  # Two kinds of caller reach this surface, both with an Authorization
+  # Bearer header:
+  #   - the three services (openwebui, openclaw, coder) with a static
+  #     per-service key (apiKey): the least machinery that fits, a straight
+  #     drop-in for the `api_key` field every OpenAI-compatible client has;
+  #   - people and command-line clients (OpenCode, scripts) with a JWT they
+  #     mint themselves from an Authentik App password (jwtAuth, provider
+  #     ai-stand-llm in docker/authentik/configure.mjs; README explains the
+  #     exchange). No administrative right is involved.
+  # Both policies run in permissive mode, which only validates a credential
+  # when one is of that kind and attaches its identity; the authorization
+  # rule below is what actually denies. A request with neither a known key
+  # nor a valid JWT of an ai-users member gets 403 (it used to be 401 under
+  # strict apiKey). Verified in a throwaway gateway: both service keys and
+  # JWTs work; a JWT without ai-users, expired, of another audience or issuer,
+  # an unknown key and no credentials at all are all denied.
   policies:
+    # The signing keys are an INLINE JWKS taken from the service environment,
+    # not fetched from Authentik: a JWKS url is loaded when the configuration
+    # is loaded and agentgateway refuses to start when it cannot be fetched,
+    # which would make a fresh install wait for a provider that only
+    # configure-authentik creates (after deploy) and tie every restart of the
+    # LLM surface to Authentik being up. The value is public key material;
+    # sync_agentgateway_llm_jwks() in apply.sh copies it from Authentik after
+    # deploy and configure-authentik, and verify compares it. The compose
+    # placeholder is an empty key set: service keys keep working and every JWT
+    # is denied until the real keys arrive. The single quotes make the
+    # substituted JSON a YAML string. The issuer is the public URL because
+    # that is what Authentik writes into the iss claim.
+    jwtAuth:
+      mode: permissive
+      issuer: $LLM_AUTHENTIK_ISSUER_URL
+      audiences: [ai-stand-llm]
+      jwks: '$LLM_AUTHENTIK_JWKS'
     apiKey:
-      mode: strict
+      mode: permissive
       location:
         header:
           name: authorization
@@ -102,13 +167,24 @@ llm:
         - key: $AGENTGATEWAY_CODER_TOKEN
           metadata:
             name: coder
+    # Who may call (a known service key, or an ai-users member's JWT) AND what
+    # may be called. Agentgateway forwards any path of a request that carries a
+    # JSON body with a model field to the backend, and llama-server has its own
+    # endpoints beside the OpenAI ones (tokenize, slots, props, raw completion).
+    # The path list below is what the removed model proxies used to enforce: only
+    # the OpenAI-style endpoints agentgateway itself serves are reachable. Paths
+    # are matched exactly (trailing slash, doubled slash and percent-encoded
+    # variants are refused; a query string is fine).
+    authorization:
+      rules:
+        - allow: "(has(apiKey.name) || 'ai-users' in jwt.groups) && (request.path in ['/v1/chat/completions', '/v1/embeddings', '/v1/models', '/v1/responses', '/v1/messages'] || request.path.startsWith('/v1/models/'))"
 
 # Read-only admin/observability console (route + backend introspection) -
 # not a config editor, agentgateway's real configuration is this file. This
 # is the one part of agentgateway a human ever browses to directly, so it is
 # the one place real groups-based CEL RBAC actually applies: the Authentik
 # application below is bound to ai-admins only (matching the
-# operational-tool precedent already set by Portainer/MetaMCP in this
+# operational-tool precedent already set by Portainer in this
 # repo), and the CEL rule re-checks the same group from the groups claim
 # agentgateway receives - the mechanism the ai-admins/ai-users/ai-api-clients
 # split was asked for, demonstrated where it is actually meaningful.
@@ -132,8 +208,7 @@ ui:
 
 # Installation-owned read-only MCP routes are rendered only when the profile
 # supplies a complete, protected account inventory. The renderer copies this
-# base file and replaces the marker below with routing-mode MCP configuration
-# plus an admin-only aggregate GigaCode subscription status route; this
-# generic source deliberately contains no user identities, endpoints or
+# base file and replaces the marker below with routing-mode MCP configuration;
+# this generic source deliberately contains no user identities, endpoints or
 # secrets.
 # READONLY_MCP_ROUTES_RENDER

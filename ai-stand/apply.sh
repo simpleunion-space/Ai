@@ -6,192 +6,204 @@ PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 export PATH
 
 STACK_NAME="ai-stand"
+READ_ONLY_VERIFY="0"
+# Fixed by the images (the users they are built with), llamacpp/runtime.py and verify; not an installation value.
 IM_UID="10000"
 IM_GID="20000"
-IM_TZ="Europe/Moscow"
+# Time zone of every service and of both hosts. The generic default is UTC; an installation profile overrides it with its own
+# IM_TZ.
+IM_TZ="UTC"
 APP_UID="$IM_UID"
 APP_GID="$IM_GID"
 
-IMAGE_VERSION="2026.08.07-1"
+IMAGE_VERSION="2026.10.13-1"
 BASE_IMAGE="ghcr.io/simpleunion/base:${IMAGE_VERSION}"
-# lmstudio carries its own tag, separate from IMAGE_VERSION: its Dockerfile changes
-# (LM Studio app refresh, llama.cpp runtime bumps) independently of the shared base
-# image, which did not change here. Also bumped, with no Dockerfile content
-# change, whenever a plain --no-cache rebuild is done purely to refresh the
-# apt packages it installs (glibc/openssl/etc security patches) - same
-# reasoning as every other date-stamped tag here: the tag must change for
-# Swarm to actually redeploy a locally-built, no-digest image, see
-# REBUILT_IMAGE_VERSION's comment below.
-LMSTUDIO_IMAGE_VERSION="2026.09.23-1"
-LMSTUDIO_CPU_IMAGE="ghcr.io/kukurusik/ai-stand-lmstudio:${LMSTUDIO_IMAGE_VERSION}-cpu"
-LMSTUDIO_AMD_IMAGE="ghcr.io/kukurusik/ai-stand-lmstudio:${LMSTUDIO_IMAGE_VERSION}-amd"
-LMSTUDIO_NVIDIA_IMAGE="ghcr.io/kukurusik/ai-stand-lmstudio:${LMSTUDIO_IMAGE_VERSION}-nvidia"
-# The OpenClaw image contains the two version-pinned trusted-proxy patches:
-# one renders a display-only Authentik name and one preserves the already
-# authenticated browser subject for the GigaCode requester hook.  Bump the
-# shared rebuilt tag so a Swarm deployment cannot silently reuse the old
-# image after the Dockerfile changes.
-REBUILT_IMAGE_VERSION="2026.09.23-1"
+LLAMACPP_IMAGE_VERSION="2026.10.13-1"
+LLAMACPP_CPU_IMAGE="ghcr.io/kukurusik/ai-stand-llamacpp:${LLAMACPP_IMAGE_VERSION}-cpu"
+# Filled after the installation profile provides each node's GFX. There is
+# deliberately no shared mutable AMD tag across incompatible architectures.
+LLAMACPP01_AMD_IMAGE=""
+LLAMACPP02_AMD_IMAGE=""
+LLAMACPP_NVIDIA_IMAGE="ghcr.io/kukurusik/ai-stand-llamacpp:${LLAMACPP_IMAGE_VERSION}-nvidia"
+# The OpenClaw image contains a version-pinned trusted-proxy patch that
+# renders a display-only Authentik name.  Bump the shared rebuilt tag so a
+# Swarm deployment cannot silently reuse the old image after the Dockerfile
+# changes.
+REBUILT_IMAGE_VERSION="2026.10.21-2"
+# The configure-authentik script is baked into its own image. Changing only that
+# script must not force a rebuild and restart of the Authentik server image, so
+# its tag is bumped independently (same reasoning as OPENCLAW_IMAGE_VERSION).
+AUTHENTIK_CONFIGURATOR_IMAGE_VERSION="2026.10.24-1"
+# The Gitea SSH-key synchronizer (docker/gitea-ssh-sync) is a small Python
+# service of its own; bump this whenever sync.py or its Dockerfile changes.
+GITEA_SSH_SYNC_IMAGE_VERSION="2026.10.24-2"
+# The SSH private-key delivery (docker/ssh-key-delivery) bundles docker/gitea-ssh-sync/sync.py; bump this whenever
+# delivery.py, that sync.py or the Dockerfile changes.
+SSH_KEY_DELIVERY_IMAGE_VERSION="2026.10.24-3"
+# The controller (docker/controller) runs the recurring jobs that used to be host systemd timers: the MCP/Telegram
+# reconciler, the Open WebUI model-access reconciler and the certificate renewal; the same image is the certificate
+# receiver on the other node. Bump this whenever controller.py, certbot/*.sh or its Dockerfile changes.
+CONTROLLER_IMAGE_VERSION="2026.10.24-2"
 # OpenClaw contains version-pinned runtime patches and needs an independent
 # tag bump whenever its image changes.  Keeping this separate avoids
-# needlessly rebuilding unrelated Authentik and LM Studio Proxy images.
-OPENCLAW_IMAGE_VERSION="2026.09.23-1"
-GIGACODE_SUBSCRIPTION_BRIDGE_IMAGE_VERSION="2026.09.21-1"
-GIGACODE_IDENTITY_BROKER_IMAGE_VERSION="2026.09.21-1"
-GIGACODE_IDENTITY_BROKER_JWKS_SECRET="ai-stand-gigacode-broker-public-jwks-v2"
-READONLY_MCP_IMAGE_VERSION="2026.09.19-1"
-# Bump together with docker/coder-templates/ai-stand-dev/main.tf's own
-# `image = "ai-stand-coder-workspace:..."` literal - Terraform files have no
-# shared substitution with apply.sh, so this tag is necessarily duplicated
-# in both places, not derived.
-CODER_WORKSPACE_IMAGE_VERSION="2026.09.23-1"
-CODER_VERSION="2.36.6"
-# NOT bumped to 2026.9.5 yet (confirmed live 2026-09-23): the display-name
-# trusted-proxy patch's target import line genuinely restructured in that
-# release, not just renamed - getUserProfileDisplay moved out into its own
-# user-profiles-owner-*.mjs module that doesn't exist in 2026.9.4, so
-# apply-authentik-display-name-patch.mjs's importBefore/importAfter can
-# never match it as-is. That patch (and its sibling identity patch) touch
-# identity/auth-resolution code, and 2026.9.5's own release notes call out
-# unspecified "credential safety" changes in the same area - adapting them
-# deserves a careful, standalone pass, not a rushed edit alongside four
-# other version bumps. OPENCLAW_IMAGE_VERSION below is still bumped, so
-# this rebuild still ships the GigaCode requester plugin fix from this same
-# session even though OpenClaw itself stays on 2026.9.4 for now.
-OPENCLAW_VERSION="2026.9.4"
+# needlessly rebuilding the unrelated Authentik image.
+OPENCLAW_IMAGE_VERSION="2026.10.25-1"
+READONLY_MCP_IMAGE_VERSION="2026.10.13-1"
+# Bump together with both C# and Python Terraform templates: their image
+# literals cannot interpolate this shell variable.
+CODER_WORKSPACE_IMAGE_VERSION="2026.10.21-1"
+CODER_VERSION="2.38.0"
+GITEA_VERSION="28.1.0"
+GITEA_IMAGE="docker.gitea.com/gitea:${GITEA_VERSION}-rootless"
+POSTGRES_IMAGE="docker.io/library/postgres:18.6-alpine"
+GITEA_POSTGRES_IMAGE="$POSTGRES_IMAGE"
+# OpenClaw's trusted-proxy patch below is version-pinned and verified
+# against the exact 2026.10.2 npm payload. Keep the upstream version and the
+# image tag together: a later package must fail the build until its source
+# hashes and single-occurrence snippets are reviewed again.
+OPENCLAW_VERSION="2026.10.2"
 AUTHENTIK_VERSION="2026.8.3"
-LMSTUDIO_PROXY_IMAGE="ghcr.io/kukurusik/ai-stand-lmstudio-proxy:${REBUILT_IMAGE_VERSION}"
 OPENCLAW_IMAGE="ghcr.io/kukurusik/ai-stand-openclaw:${OPENCLAW_IMAGE_VERSION}"
-# 2.45.1 fixes 3 Critical CVEs (openssl/libssl3: CVE-2026-63073,
+# 2.45.2 LTS includes the fixes from 2.45.1 for Critical CVEs (openssl/libssl3: CVE-2026-63073,
 # CVE-2026-75803; kubectl: CVE-2026-39821), confirmed against the upstream
 # release notes 2026-09-23.
-PORTAINER_IMAGE="portainer/portainer-ce:2.45.1"
-PORTAINER_AGENT_IMAGE="portainer/agent:2.45.1"
-OPENWEBUI_IMAGE="ghcr.io/open-webui/open-webui:v0.11.4"
+PORTAINER_IMAGE="portainer/portainer-ce:2.45.2"
+PORTAINER_AGENT_IMAGE="portainer/agent:2.45.2"
+OPENWEBUI_IMAGE="ghcr.io/open-webui/open-webui:v0.12.3"
 AUTHENTIK_IMAGE="ghcr.io/kukurusik/ai-stand-authentik:${REBUILT_IMAGE_VERSION}"
-AUTHENTIK_POSTGRES_IMAGE="docker.io/library/postgres:18-alpine"
-AUTHENTIK_REDIS_IMAGE="docker.io/library/redis:8.10-alpine"
-# MetaMCP only ships a single combined image (frontend+backend). Its own
-# docker-compose.yml pins postgres:16-alpine, but bumped to match
-# authentik-postgresql's version here - see the note on the metamcp-postgres
-# service in compose.yaml.
-METAMCP_IMAGE="ghcr.io/metatool-ai/metamcp:2.4.22"
-METAMCP_POSTGRES_IMAGE="docker.io/library/postgres:18-alpine"
-OPENCLAW_SANDBOX_DIND_IMAGE="docker.io/library/docker:29.8.0-dind"
-# LLM gateway in front of lmstudio-proxy (not LM Studio directly, so every
-# consumer inherits its tool-call compatibility fixes). Its admin console
+AUTHENTIK_POSTGRES_IMAGE="$POSTGRES_IMAGE"
+AUTHENTIK_REDIS_IMAGE="docker.io/library/redis:8.10.2-alpine"
+# LLM gateway in front of the transport-only model proxies. Its admin console
 # uses OIDC/RBAC; its LLM API uses per-service bearer tokens. An opt-in
 # profile additionally renders identity-scoped read-only MCP routes here.
-AGENTGATEWAY_IMAGE="cr.agentgateway.dev/agentgateway:v1.5.0"
+AGENTGATEWAY_IMAGE="cr.agentgateway.dev/agentgateway:v1.6.0"
 # Coder is an upstream image. ai-stand builds a tiny local wrapper so its
 # PostgreSQL and OIDC secrets stay mounted files rather than service env.
-# Do not invent a digest: the images stage verifies the released upstream tag.
+# Image identities are pinned by version tag only, not by registry digest.
 CODER_BASE_IMAGE="ghcr.io/coder/coder:v${CODER_VERSION}"
 CODER_IMAGE="ai-stand-coder:${CODER_VERSION}-1"
-CODER_POSTGRES_IMAGE="docker.io/library/postgres:18-alpine"
-# Derived from the pin above, not a separate hardcoded value: this is the
-# CLI half of the same client/daemon version pair used to build the
-# openclaw-gateway image's `docker` binary (see docker/openclaw/Dockerfile),
-# so the two can't silently drift apart.
-DOCKER_CLI_VERSION="${OPENCLAW_SANDBOX_DIND_IMAGE##*:}"
-DOCKER_CLI_VERSION="${DOCKER_CLI_VERSION%-dind}"
-# Tag OpenClaw's Docker sandbox backend hardcodes and looks for by default
-# (agents.defaults.sandbox.backend=docker, see docker/openclaw/init.mjs) -
-# not a registry image, built locally inside openclaw-sandbox-dind itself by
-# ensure_openclaw_sandbox_image from docker/openclaw-sandbox/Dockerfile.
-OPENCLAW_SANDBOX_IMAGE="openclaw-sandbox:bookworm-slim"
-# Not a registry image either - built locally against the dedicated Coder
-# rootless daemon by ensure_coder_workspace_image() from
-# docker/coder-workspace/Dockerfile, and referenced by tag (no digest, same
-# reason as CODER_IMAGE above) from the ai-stand-dev template's
-# docker_container.workspace resource.
-CODER_WORKSPACE_IMAGE="ai-stand-coder-workspace:${CODER_WORKSPACE_IMAGE_VERSION}"
-AUTHENTIK_CONFIGURATOR_IMAGE="ghcr.io/kukurusik/ai-stand-authentik-configurator:${REBUILT_IMAGE_VERSION}"
-GIGACODE_SUBSCRIPTION_BRIDGE_IMAGE="ai-stand-gigacode-subscription-bridge:${GIGACODE_SUBSCRIPTION_BRIDGE_IMAGE_VERSION}"
-GIGACODE_IDENTITY_BROKER_IMAGE="ai-stand-gigacode-identity-broker:${GIGACODE_IDENTITY_BROKER_IMAGE_VERSION}"
-OPENCLAW_GIGACODE_ADAPTER_IMAGE_VERSION="2026.09.21-1"
-OPENCLAW_GIGACODE_ADAPTER_IMAGE="ai-stand-openclaw-gigacode-adapter:${OPENCLAW_GIGACODE_ADAPTER_IMAGE_VERSION}"
+CODER_POSTGRES_IMAGE="$POSTGRES_IMAGE"
+AGENTGATEWAY_POSTGRES_IMAGE="$POSTGRES_IMAGE"
+DOCKER_SOCKET_PROXY_IMAGE="ghcr.io/tecnativa/docker-socket-proxy:v0.5.0"
+# The two non-published Coder workspace images are built locally on ai02.
+# They have distinct C# and Python tags; neither image contains a Docker
+# daemon or receives a Docker socket.
+CODER_CSHARP_WORKSPACE_IMAGE="ai-stand-coder-workspace-csharp:${CODER_WORKSPACE_IMAGE_VERSION}"
+CODER_PYTHON_WORKSPACE_IMAGE="ai-stand-coder-workspace-python:${CODER_WORKSPACE_IMAGE_VERSION}"
+AUTHENTIK_CONFIGURATOR_IMAGE="ghcr.io/kukurusik/ai-stand-authentik-configurator:${AUTHENTIK_CONFIGURATOR_IMAGE_VERSION}"
+GITEA_SSH_SYNC_IMAGE="ghcr.io/kukurusik/ai-stand-gitea-ssh-sync:${GITEA_SSH_SYNC_IMAGE_VERSION}"
+SSH_KEY_DELIVERY_IMAGE="ghcr.io/kukurusik/ai-stand-ssh-key-delivery:${SSH_KEY_DELIVERY_IMAGE_VERSION}"
+CONTROLLER_IMAGE="ghcr.io/kukurusik/ai-stand-controller:${CONTROLLER_IMAGE_VERSION}"
 JIRA_READONLY_MCP_IMAGE="ai-stand-jira-readonly-mcp:${READONLY_MCP_IMAGE_VERSION}"
 CONFLUENCE_READONLY_MCP_IMAGE="ai-stand-confluence-readonly-mcp:${READONLY_MCP_IMAGE_VERSION}"
 IMAP_READONLY_MCP_IMAGE="ai-stand-imap-readonly-mcp:${READONLY_MCP_IMAGE_VERSION}"
 DIAGNOSTIC_IMAGE="ghcr.io/kukurusik/ai-stand-diagnostic:${IMAGE_VERSION}"
 
-AMD_AMDGPU_INSTALL_URL="https://repo.radeon.com/amdgpu/31.50/ubuntu/pool/main/a/amdgpu-install/amdgpu-install_31.50.0.0.31500000-2390945.24.04_all.deb"
-AMD_AMDGPU_INSTALL_SHA256="1b2d7613ac3d04ba74bb718ba28297eff8bd2c52f34a91e751d3044e7998e9cb"
-AMD_ROCM_APT_CODENAME="noble"
+AMD_AMDGPU_INSTALL_URL="https://repo.radeon.com/amdgpu-install/31.60/ubuntu/resolute/amdgpu-install_31.60.316000-1_all.deb"
+AMD_AMDGPU_INSTALL_SHA256="aa11c1f098abc64a9da05c0ad6eaea523787a39780513a72baceb857fc123f10"
+AMD_ROCM_APT_CODENAME="resolute"
 AMD_CONTAINER_TOOLKIT_KEY_URL="https://repo.radeon.com/rocm/rocm.gpg.key"
 AMD_CONTAINER_TOOLKIT_REPO_URL="https://repo.radeon.com/amd-container-toolkit/apt/"
 # ROCm compute-library release line (stable.repo.amd.com's "amdrocm<release>-gfx<gfx>"
 # package scheme - see ensure_amd_driver()). AMD_ROCM_GFX_VERSION has no default;
 # each installation profile must set it per node to that node's actual GPU.
-AMD_ROCM_RELEASE="10.0"
+AMD_ROCM_RELEASE="10.1"
 AMD_ROCM_GFX_VERSION="${AMD_ROCM_GFX_VERSION:-}"
+NGINX_VERSION="1.30.6"
+NGINX_SIGNING_FINGERPRINT="573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62"
 NVIDIA_CONTAINER_TOOLKIT_KEY_URL="https://nvidia.github.io/libnvidia-container/gpgkey"
 NVIDIA_CONTAINER_TOOLKIT_LIST_URL="https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list"
 
-LMSTUDIO_DATA_ROOT="/mnt/storage/lmstudio-data"
-OPENCLAW_DATA_ROOT="/mnt/storage/openclaw-data"
-OPENWEBUI_DATA_ROOT="/mnt/storage/openwebui-data"
-AUTHENTIK_DATA="/mnt/storage/authentik-data"
-# authentik-server and authentik-worker share both subdirectories below -
-# "server" names the role (matching openwebui/portainer's own single-app
-# "server" role), not the file type - data/templates aren't a role of their
-# own the way postgresql/redis are (see ensure_authentik_data()).
-AUTHENTIK_DATA_SERVER="${AUTHENTIK_DATA}/server"
-AUTHENTIK_ICONS_DATA="${AUTHENTIK_DATA}/icons"
-PORTAINER_DATA_ROOT="/mnt/storage/portainer-data"
-METAMCP_DATA_ROOT="/mnt/storage/metamcp-data"
-AGENTGATEWAY_DATA_ROOT="/mnt/storage/agentgateway-data"
-# Reconciler state is deliberately separate from agentgateway-data: only a
-# root-owned host timer may read the AppRole files, generate Docker Secrets
-# or alter the dynamic MCP manifest. The running gateway sees only its
-# rendered config and explicitly mounted backend bearer secrets.
-READONLY_MCP_DATA_ROOT="/mnt/storage/readonly-mcp-data"
-# Installation-specific deployment overrides deliberately live outside the
-# source tree. They are not an environment-file include: the loader below
-# accepts one exact key/value record only, so a root-local override cannot
-# execute arbitrary shell while apply.sh is running as root.
-AI_STAND_DATA_ROOT="/mnt/storage/ai-stand-data"
-INSTALLATION_OVERRIDES_ROOT="${AI_STAND_DATA_ROOT}/installation-overrides"
-READONLY_MCP_RUNTIME_OVERRIDE_FILE="${INSTALLATION_OVERRIDES_ROOT}/readonly-mcp.env"
-CODER_DATA_ROOT="/mnt/storage/coder-data"
-LMSTUDIO_DATA="${LMSTUDIO_DATA_ROOT}/lmstudio"
-OPENCLAW_DATA="${OPENCLAW_DATA_ROOT}/gateway"
-OPENCLAW_SANDBOX_DATA="${OPENCLAW_DATA_ROOT}/sandbox-dind"
-# The Gateway owns this path. It is deliberately the only part of its
-# persistent home made visible to the separate Docker-in-Docker daemon; see
-# ensure_openclaw_sandbox_dind_service().
-OPENCLAW_SANDBOX_WORKSPACE_ROOT="${OPENCLAW_DATA}/.openclaw/sandboxes"
-# Narrow, non-secret hand-off from the OpenClaw requester plugin to the
-# local GigaCode adapter.  It stores only opaque session IDs, Authentik
-# subject UUIDs and expiry timestamps; device IDs and broker private keys
-# never reach ai02.
-OPENCLAW_GIGACODE_REQUESTER_DIR="${OPENCLAW_DATA}/.openclaw/gigacode-requester"
-OPENCLAW_GIGACODE_SESSION_MAP="${OPENCLAW_GIGACODE_REQUESTER_DIR}/sessions.json"
-OPENWEBUI_DATA="${OPENWEBUI_DATA_ROOT}/server"
-PORTAINER_DATA="${PORTAINER_DATA_ROOT}/server"
-METAMCP_DATA="${METAMCP_DATA_ROOT}/postgres"
-# Holds only the rendered config.yaml agentgateway is bind-mounted (see
-# install_agentgateway_config()). Named "server" (not "config") to match
-# the {component}-data/{role} convention every other component follows.
-AGENTGATEWAY_DATA="${AGENTGATEWAY_DATA_ROOT}/server"
-# Backs agentgateway-postgres: agentgateway's own request-log/analytics
-# database (config.logging.database in agentgateway/config.yaml). A second
-# role under the same root, same convention as CODER_SERVER_DATA/
-# CODER_POSTGRES_DATA below.
-AGENTGATEWAY_POSTGRES_DATA="${AGENTGATEWAY_DATA_ROOT}/postgres"
-CODER_SERVER_DATA="${CODER_DATA_ROOT}/server"
-CODER_POSTGRES_DATA="${CODER_DATA_ROOT}/postgres"
-CODER_PROVISIONER_DATA="${CODER_DATA_ROOT}/provisioner"
-CODER_PROVISIONER_HOME="${CODER_PROVISIONER_DATA}/home"
-CODER_PROVISIONER_RUNTIME="${CODER_PROVISIONER_DATA}/runtime"
-CODER_PROVISIONER_DOCKER_DATA="${CODER_PROVISIONER_DATA}/docker"
-CODER_ROOTLESS_DOCKER_SOCKET="${CODER_PROVISIONER_DATA}/docker.sock"
-CODER_RUNTIME_USER="service"
-CODER_WORKSPACE_NETWORK="ai-coder-workspaces"
-BACKUP_ROOT="/mnt/storage/_backups"
-NGINX_BACKUP_DIR="${BACKUP_ROOT}/nginx"
-CERT_DIR="/mnt/storage/certbot-data/live/local"
+# --- storage layout -----------------------------------------------------------------------------------------------------
+# Every component keeps its data in <storage root>/<component>-data/<part>, and the storage root is a property of the
+# installation: STORAGE_ROOT in its profile (installation.sh). No path under it is spelled out anywhere else - the compose
+# files, the nginx sites, the wrapper and the Python helpers all receive it from here (STORAGE_ROOT is exported, and
+# apply.sh renders the nginx sites with it). define_storage_paths() derives every path; it runs once now with the default
+# root, for anything that runs before a profile is loaded, and again in load_installation() after the profile is sourced.
+STORAGE_ROOT="/mnt/storage"
+# A profile input (the certificate directory of its domain); empty takes the default under CERTBOT_DATA.
+CERT_DIR=""
+
+define_storage_paths() {
+  [[ "$STORAGE_ROOT" =~ ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$ ]] && [[ "$STORAGE_ROOT" != *..* ]] \
+    || die "STORAGE_ROOT must be an absolute path without a trailing slash"
+  export STORAGE_ROOT
+  LLAMACPP_DATA_ROOT="${STORAGE_ROOT}/llamacpp-data"
+  OPENCLAW_DATA_ROOT="${STORAGE_ROOT}/openclaw-data"
+  OPENWEBUI_DATA_ROOT="${STORAGE_ROOT}/openwebui-data"
+  AUTHENTIK_DATA="${STORAGE_ROOT}/authentik-data"
+  # authentik-server and authentik-worker share both subdirectories below -
+  # "server" names the role (matching openwebui/portainer's own single-app
+  # "server" role), not the file type - data/templates aren't a role of their
+  # own the way postgresql/redis are (see ensure_authentik_data()).
+  AUTHENTIK_DATA_SERVER="${AUTHENTIK_DATA}/server"
+  AUTHENTIK_ICONS_DATA="${AUTHENTIK_DATA}/icons"
+  PORTAINER_DATA_ROOT="${STORAGE_ROOT}/portainer-data"
+  AGENTGATEWAY_DATA_ROOT="${STORAGE_ROOT}/agentgateway-data"
+  # Reconciler state is deliberately separate from agentgateway-data: only a
+  # root-owned host timer may read its API-token files, generate Docker Secrets
+  # or alter the dynamic MCP manifest. The running gateway sees only its
+  # rendered config and explicitly mounted backend bearer secrets.
+  READONLY_MCP_DATA_ROOT="${STORAGE_ROOT}/readonly-mcp-data"
+  # Installation-specific deployment overrides deliberately live outside the
+  # source tree. They are not an environment-file include: the loader below
+  # accepts one exact key/value record only, so a root-local override cannot
+  # execute arbitrary shell while apply.sh is running as root.
+  AI_STAND_DATA_ROOT="${STORAGE_ROOT}/ai-stand-data"
+  INSTALLATION_OVERRIDES_ROOT="${AI_STAND_DATA_ROOT}/installation-overrides"
+  READONLY_MCP_RUNTIME_OVERRIDE_FILE="${INSTALLATION_OVERRIDES_ROOT}/readonly-mcp.env"
+  CODER_DATA_ROOT="${STORAGE_ROOT}/coder-data"
+  # Written by the ssh-key-receiver (docker/ssh-key-delivery): users/<login> is bind-mounted read-only into that member's
+  # Coder workspaces, services/<name> into that service (the OpenClaw Gateway mounts services/openclaw; compose.yaml, so it
+  # always exists). Directories 0700 and files 0400, owned by the workspace identity.
+  SSH_KEY_DELIVERY_DATA_ROOT="${STORAGE_ROOT}/ssh-key-delivery-data"
+  SSH_KEYS_ROOT="${SSH_KEY_DELIVERY_DATA_ROOT}/users"
+  SSH_SERVICE_KEYS_ROOT="${SSH_KEY_DELIVERY_DATA_ROOT}/services"
+  LLAMACPP01_DATA="${LLAMACPP_DATA_ROOT}/llamacpp01"
+  LLAMACPP02_DATA="${LLAMACPP_DATA_ROOT}/llamacpp02"
+  OPENCLAW_DATA="${OPENCLAW_DATA_ROOT}/gateway"
+  OPENCLAW_DOCKER_SANDBOX_WORKSPACE_ROOT="${OPENCLAW_DATA_ROOT}/sandboxes"
+  OPENWEBUI_DATA="${OPENWEBUI_DATA_ROOT}/server"
+  PORTAINER_DATA="${PORTAINER_DATA_ROOT}/server"
+  # Holds only the rendered config.yaml agentgateway is bind-mounted (see
+  # install_agentgateway_config()). Named "server" (not "config") to match
+  # the {component}-data/{role} convention every other component follows.
+  AGENTGATEWAY_DATA="${AGENTGATEWAY_DATA_ROOT}/server"
+  # Backs agentgateway-postgres: agentgateway's own request-log/analytics
+  # database (config.logging.database in agentgateway/config.yaml). A second
+  # role under the same root, same convention as CODER_SERVER_DATA/
+  # CODER_POSTGRES_DATA below.
+  AGENTGATEWAY_POSTGRES_DATA="${AGENTGATEWAY_DATA_ROOT}/postgres"
+  CODER_SERVER_DATA="${CODER_DATA_ROOT}/server"
+  CODER_POSTGRES_DATA="${CODER_DATA_ROOT}/postgres"
+  GITEA_DATA_ROOT="${STORAGE_ROOT}/gitea-data"
+  GITEA_SERVER_DATA="${GITEA_DATA_ROOT}/gitea/data"
+  GITEA_CONFIG_DATA="${GITEA_DATA_ROOT}/gitea/config"
+  GITEA_POSTGRES_DATA="${GITEA_DATA_ROOT}/gitea/postgres"
+  GITEA_BACKUPS_DATA="${GITEA_DATA_ROOT}/gitea/backups"
+  LEGACY_GITLAB_DATA_ROOT="${STORAGE_ROOT}/gitlab-data"
+  BACKUP_ROOT="${STORAGE_ROOT}/_backups"
+  LEGACY_GITLAB_ARCHIVE_ROOT="${BACKUP_ROOT}/gitlab-retired"
+  NGINX_BACKUP_DIR="${BACKUP_ROOT}/nginx"
+  # ensure_ai_stand_secrets() generates and persists each secret under this directory on first use.
+  AI_STAND_SECRETS_DIR="${STORAGE_ROOT}/_secrets"
+  CERTBOT_DATA="${STORAGE_ROOT}/certbot-data"
+  CERT_DIR="${CERT_DIR:-${CERTBOT_DATA}/live/local}"
+  CODER_TEMPLATE_PUBLISHER_TOKEN_FILE="${AI_STAND_SECRETS_DIR}/coder-template-publisher-token"
+  OPENWEBUI_MODEL_ACCESS_CONFIG="${AI_STAND_DATA_ROOT}/identity/openwebui-model-access.json"
+  READONLY_MCP_RECONCILER_DATA="${READONLY_MCP_DATA_ROOT}/reconciler"
+  READONLY_MCP_MANIFEST="${READONLY_MCP_RECONCILER_DATA}/manifest.json"
+  READONLY_MCP_RECONCILER_CONFIG="${READONLY_MCP_RECONCILER_DATA}/reconciler.json"
+  READONLY_MCP_RENDERED_COMPOSE="${AGENTGATEWAY_DATA}/readonly-mcp.compose.yaml"
+}
+define_storage_paths
+
+# name=Authentik username[,...]: services (not people) with a dedicated SSH key. The Authentik account holds the key in the
+# attributes of a person's key (generated by configure-ssh-key-delivery when it has none), the delivery puts it in
+# services/<name>, and the Gitea synchronizer registers its public half in the Gitea account of the same name.
+SSH_SERVICE_ACCOUNTS="${SSH_SERVICE_ACCOUNTS:-openclaw=ai-stand-openclaw-bot}"
+GITEA_HOST="${GITEA_HOST:-gitea.local}"
+GITEA_SSH_PORT="${GITEA_SSH_PORT:-2222}"
 CERT_DOMAIN="local"
 
 AI01_HOST="ai01.local"
@@ -202,29 +214,47 @@ OPENCLAW_AUTHENTIK_TRUSTED_PROXY_ENABLED="0"
 OPENCLAW_TRUSTED_PROXIES="127.0.0.1,::1"
 PORTAINER_HOST="portainer.local"
 AUTHENTIK_HOST="authentik.local"
-METAMCP_HOST="metamcp.local"
 AGENTGATEWAY_HOST="agentgateway.local"
 CODER_HOST="coder.local"
+GITEA_HOST="${GITEA_HOST:-gitea.local}"
 
-# Both default off generically - installations override the one they've
-# confirmed a need for in their own installation.sh. See docker/lmstudio-proxy/server.mjs.
-LMSTUDIO_PROXY_STRIP_TOOLS_AFTER_RESULT_ENABLED="0"
-LMSTUDIO_PROXY_FLATTEN_TOOL_RESULT_CONTENT_ENABLED="0"
-
-LMSTUDIO_MODEL_IDENTIFIER="qwen/qwen3-1.7b"
-LMSTUDIO_EMBEDDING_MODEL_IDENTIFIER="qwen3-embedding-0.6b-q8"
-LMSTUDIO_CHAT_TIMEOUT_SECONDS="300"
+LLAMACPP_MODEL_IDENTIFIER="qwen/qwen3-1.7b"
+LLAMACPP_EMBEDDING_MODEL_IDENTIFIER="qwen3-embedding-0.6b"
+# Verification budget only; this never changes service/provider timeouts.
+# Busy installations can supply a longer bounded budget for queued probes.
+LLAMACPP_CHAT_TIMEOUT_SECONDS="${LLAMACPP_CHAT_TIMEOUT_SECONDS:-300}"
 
 AUTHENTIK_SECRET_KEY_SECRET="ai-stand-authentik-secret-key"
 AUTHENTIK_POSTGRES_PASSWORD_SECRET="ai-stand-authentik-postgres-password"
 # AUTHENTIK_BOOTSTRAP_TOKEN, AUTHENTIK_OPENWEBUI_CLIENT_SECRET,
 # AUTHENTIK_PORTAINER_CLIENT_SECRET, AUTHENTIK_BOOTSTRAP_PASSWORD,
 # PORTAINER_ADMIN_PASSWORD, WEBUI_SECRET_KEY, OPENCLAW_GATEWAY_TOKEN,
-# METAMCP_POSTGRES_PASSWORD, METAMCP_BETTER_AUTH_SECRET and
-# METAMCP_BOOTSTRAP_PASSWORD are not literals:
+# are not literals:
 # ensure_ai_stand_secrets() generates and persists each one under
 # AI_STAND_SECRETS_DIR on first use and reuses it on every later run.
-AI_STAND_SECRETS_DIR="/mnt/storage/_secrets"
+# (AI_STAND_SECRETS_DIR is derived in define_storage_paths.)
+# The controller container (ai01) and, with CERTBOT_RECEIVER_ENABLED, the cert-receiver on the other node.
+CONTROLLER_ENABLED="1"
+# Ceiling the model selector may pick the chat context from; empty means LLAMACPP_CHAT_CONTEXT_LENGTH.
+LLAMACPP_CHAT_POLICY_MAX_CONTEXT=""
+# 1: a full deploy needs the model migration controller's completion receipt for the selected embedding model first
+# (model-migrate-q4, see the installation's apply-model-profile.sh) and points OpenClaw's memory at its generation.
+MODEL_MIGRATION_REQUIRED="0"
+# Automatic wildcard certificate: DNS-01 through an installation-provided hook,
+# renewed by the controller container on ai01 and handed to ai02's cert-receiver
+# (see certbot/README.md). Off by default; an installation turns it on and names
+# its DNS provider's pieces.
+CERTBOT_ENABLED="0"
+CERTBOT_IMAGE="docker.io/certbot/certbot:v5.7.0"
+CERTBOT_EMAIL=""
+# (CERTBOT_DATA is derived in define_storage_paths.)
+# File name under AI_STAND_SECRETS_DIR holding the DNS API credentials (env-file format).
+CERTBOT_CREDENTIALS_NAME=""
+# DNS hook script, relative to the installation directory (mounted into the certbot container as /hooks).
+CERTBOT_HOOK_SOURCE=""
+# 1 when the other node runs a cert-receiver service that gets every renewed certificate over the encrypted overlay
+# network (bearer token from a Docker secret). 0: no hand-over.
+CERTBOT_RECEIVER_ENABLED="0"
 AUTHENTIK_BOOTSTRAP_USERNAME="akadmin"
 PORTAINER_ADMIN_USERNAME="admin"
 # Bootstrap-only Coder owner, created non-interactively via `coder server
@@ -234,8 +264,8 @@ PORTAINER_ADMIN_USERNAME="admin"
 # Real day-to-day access is still Authentik OIDC (ai-admins -> owner via
 # CODER_OIDC_USER_ROLE_MAPPING); this is only the emergency/first-boot
 # account, same role as akadmin for Authentik. {component}@ai-stand.local,
-# not a shared admin@ai-stand.local - see METAMCP_BOOTSTRAP_EMAIL below for
-# why that collision is a real, already-hit failure mode.
+# not a shared admin@ai-stand.local: an OIDC login whose email already belongs
+# to a same-app password account gets rejected (confirmed live 2026-09-09).
 CODER_ADMIN_USERNAME="admin"
 CODER_ADMIN_EMAIL="coder@ai-stand.local"
 PORTAINER_ENDPOINT_NAME="ai-stand-swarm"
@@ -246,23 +276,11 @@ PORTAINER_OAUTH_TEAM_NAME="ai-admins"
 # the two aren't derived from one another, kept in sync by hand.
 PORTAINER_OAUTH_ADMIN_USERS=("authentik@ai-stand.local")
 PORTAINER_ENVIRONMENT_ROLE_ID="1"
-# MetaMCP's admin UI has its own email+password login (Better Auth),
-# separate from Authentik - see ensure_ai_stand_secrets() /
-# apply_installation_service_env() - but IS also OIDC-enabled for human
-# login (docker/authentik/configure.mjs's metamcp provider/application).
-# Every component's own built-in-admin email follows {component}@ai-stand.local
-# rather than a shared admin@ai-stand.local, precisely to avoid this: an
-# OIDC login whose email already belongs to a same-app password account
-# gets rejected (confirmed live 2026-09-09 against a same-app collision on
-# a different component's bootstrap admin) - and there's no reason
-# MetaMCP's OIDC login couldn't hit the identical collision if left on the
-# shared address.
-METAMCP_BOOTSTRAP_EMAIL="metamcp@ai-stand.local"
-# LM Studio and its compatibility proxy deliberately have no host-published
-# ports. Their API is reachable only from Agentgateway on ai-models-backend;
+# llama.cpp deliberately has no host-published ports. Its API is reachable
+# only from Agentgateway on ai-models-backend;
 # the remaining entries below are loopback technical listeners protected by
 # the host firewall.
-TECH_PORTS=(18789 9443 18080 19001 9001 12008 4000 17080)
+TECH_PORTS=(18789 9443 18080 19001 9001 4000 17080 18082)
 PUBLIC_PORTS=(80 443)
 SWARM_TCP_PORTS=(2377 7946)
 SWARM_UDP_PORTS=(7946 4789)
@@ -271,34 +289,42 @@ SERVICES=(
   "ai-stand_authentik-redis"
   "ai-stand_authentik-server"
   "ai-stand_authentik-worker"
-  "ai-stand_lmstudio"
-  "ai-stand_lmstudio-proxy"
+  "ai-stand_llamacpp01"
+  "ai-stand_llamacpp02"
   "ai-stand_openclaw-gateway"
+  "ai-stand_docker-socket-proxy-openclaw"
   "ai-stand_openwebui"
   "ai-stand_portainer"
   "ai-stand_portainer-agent"
-  "ai-stand_metamcp-postgres"
-  "ai-stand_metamcp"
   "ai-stand_agentgateway-postgres"
   "ai-stand_agentgateway"
 )
 OBSOLETE_SERVICES=(
   "ai-stand_shannon"
   "ai-stand_lightrag"
-  # The legacy shared GigaCode bridge is retired only after the personal
-  # broker-JWT route has passed its owner-scoped probe.  Future deployments
-  # must never recreate or retain this subscription-sharing service.
-  "ai-stand_gigacode-bridge"
-  # Coder was removed entirely 2026-09-13 (never usable enough to justify
-  # its own maintenance cost); coder-provisioner specifically predates that
-  # and was already obsolete on its own - external provisioners turned out
-  # to be a Premium-only Coder feature, so it only ever ran briefly during
-  # initial bring-up before that was caught.
+  # This was an old, external Coder provisioner. Current Coder uses its
+  # built-in provisioner through docker-socket-proxy-coder; external
+  # provisioners are deliberately not part of the deployment.
   "ai-stand_coder-provisioner"
+  # The owner-aware mTLS Docker broker was retired together with per-user
+  # Coder workspace isolation (2026-10-21); Coder is back on the socket proxy.
+  "ai-stand_docker-lifecycle-broker-coder"
   "ai-stand_coder-postgres"
   "ai-stand_coder"
-  "ai-stand_gigacode-subscription-status"
-  "ai-stand_vault"
+  "ai-stand_openclaw-sandbox-main"
+  "ai-stand_openclaw-sandbox-codex"
+  "ai-stand_openclaw-sandbox-claude"
+  "ai-stand_gitlab"
+  "ai-stand_gitlab-access-reconciler"
+  # Transport-only proxies in front of llama.cpp, removed 2026-10-23:
+  # Agentgateway now talks to llamacpp01/llamacpp02 directly and itself owns
+  # the model allow-list (explicit llm.models, no wildcard).
+  "ai-stand_model-chat-proxy"
+  "ai-stand_model-embeddings-proxy"
+  # MetaMCP and its database, removed 2026-10-23 (no registered servers, no
+  # MCP traffic; user-facing MCP is served by Agentgateway routes).
+  "ai-stand_metamcp"
+  "ai-stand_metamcp-postgres"
 )
 
 SCRIPT_PATH="${BASH_SOURCE[0]}"
@@ -310,17 +336,20 @@ esac
 COMPOSE_FILE="${SCRIPT_DIR}/compose.yaml"
 COMPOSE_AMD_FILE="${SCRIPT_DIR}/compose.amd.yaml"
 COMPOSE_NVIDIA_FILE="${SCRIPT_DIR}/compose.nvidia.yaml"
-COMPOSE_GIGACODE_IDENTITY_BROKER_FILE="${SCRIPT_DIR}/compose.gigacode-identity-broker.yaml"
-COMPOSE_OPENCLAW_GIGACODE_ADAPTER_FILE="${SCRIPT_DIR}/compose.openclaw-gigacode-adapter.yaml"
 COMPOSE_CODER_FILE="${SCRIPT_DIR}/compose.coder.yaml"
+COMPOSE_GITEA_FILE="${SCRIPT_DIR}/compose.gitea.yaml"
+COMPOSE_CONTROLLER_FILE="${SCRIPT_DIR}/compose.controller.yaml"
+# Only with the file above, and only for deploy-controller, which deploys it alone (the generic deploy gets the networks
+# from compose.yaml).
+COMPOSE_CONTROLLER_STANDALONE_FILE="${SCRIPT_DIR}/compose.controller-standalone.yaml"
+# Deployed alone by configure-gitea-ssh-sync, never combined with the files above.
+COMPOSE_GITEA_SSH_SYNC_FILE="${SCRIPT_DIR}/compose.gitea-ssh-sync.yaml"
+# Deployed alone by configure-ssh-key-delivery, never combined with the files above.
+COMPOSE_SSH_KEY_DELIVERY_FILE="${SCRIPT_DIR}/compose.ssh-key-delivery.yaml"
 # ai-stand consumes separately versioned source modules but builds their
 # images locally. Deployment stages them next to the ai-stand checkout.
 AI_STAND_MODULES_ROOT="${AI_STAND_MODULES_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
-GIGACODE_SUBSCRIPTION_BRIDGE_SOURCE_DIR="${AI_STAND_MODULES_ROOT}/gigacode-subscription-bridge"
-GIGACODE_IDENTITY_BROKER_SOURCE_DIR="${SCRIPT_DIR}/docker/gigacode-identity-broker"
-OPENCLAW_GIGACODE_ADAPTER_SOURCE_DIR="${SCRIPT_DIR}/docker/openclaw-gigacode-adapter"
-OPENCLAW_GIGACODE_REQUESTER_PLUGIN_SOURCE_DIR="${SCRIPT_DIR}/docker/openclaw-gigacode-requester"
-OPENWEBUI_GIGACODE_PIPE_SOURCE="${SCRIPT_DIR}/docker/openwebui/gigacode_subscription_pipe.py"
+OPENWEBUI_MODEL_ACCESS_SOURCE_DIR="${SCRIPT_DIR}/docker/openwebui"
 MCP_READONLY_COMMON_SOURCE_DIR="${AI_STAND_MODULES_ROOT}/mcp-readonly-common"
 JIRA_READONLY_MCP_SOURCE_DIR="${AI_STAND_MODULES_ROOT}/jira-readonly-mcp"
 CONFLUENCE_READONLY_MCP_SOURCE_DIR="${AI_STAND_MODULES_ROOT}/confluence-readonly-mcp"
@@ -332,30 +361,21 @@ READONLY_MCP_RENDERER="${SCRIPT_DIR}/readonly-mcp/render-profile.py"
 # the static upstreams and the path to the Authentik API-token file, not its
 # value - per-user credentials live only in each user's own Authentik
 # profile attributes, edited through a self-service prompt stage.
-READONLY_MCP_RECONCILER_DATA="${READONLY_MCP_DATA_ROOT}/reconciler"
-READONLY_MCP_MANIFEST="${READONLY_MCP_RECONCILER_DATA}/manifest.json"
-READONLY_MCP_RECONCILER_CONFIG="${READONLY_MCP_RECONCILER_DATA}/reconciler.json"
 READONLY_MCP_RECONCILER="${SCRIPT_DIR}/readonly-mcp/reconcile.py"
-READONLY_MCP_RENDERED_COMPOSE="${AGENTGATEWAY_DATA}/readonly-mcp.compose.yaml"
-# Root-only inputs/output for the MetaMCP tenant identity control plane.
-# They are never profile fixtures or Git-tracked inventory.
-METAMCP_TENANT_CONTROL_SOURCE_DIR="${SCRIPT_DIR}/metamcp-tenants"
-METAMCP_TENANT_IDENTITY_INVENTORY="${READONLY_MCP_RECONCILER_DATA}/metamcp-tenant-identities.json"
-METAMCP_TENANT_MANIFEST="${READONLY_MCP_RECONCILER_DATA}/metamcp-tenants.json"
+CERTBOT_SOURCE_DIR="${SCRIPT_DIR}/certbot"
 READONLY_MCP_ENABLED="0"
 # Generic core publishes a neutral endpoint family. A protected host-local
 # override may replace this only at deployment time; profile sources never
 # carry organization-specific paths.
 READONLY_MCP_PATH_PREFIX="/mcp/work"
-# A GigaCode device ID is an installation-owned credential. Generic core
-# remains runnable without it; a profile must opt in explicitly before the
-# bridge service and its Docker Secret are required.
-GIGACODE_SUBSCRIPTION_ENABLED="0"
 CODER_ENABLED="0"
+GITEA_ENABLED="0"
 NGINX_CONF_SOURCE="${SCRIPT_DIR}/nginx/nginx.conf"
 NGINX_MIME_TYPES_SOURCE="${SCRIPT_DIR}/nginx/mime.types"
 NGINX_SITE_AI01_SOURCE="${SCRIPT_DIR}/nginx/conf.d/ai-stand-ai01.conf"
 NGINX_SITE_AI02_SOURCE="${SCRIPT_DIR}/nginx/conf.d/ai-stand-ai02.conf"
+NGINX_RESTART_DROPIN_SOURCE="${SCRIPT_DIR}/nginx/nginx-restart.conf"
+NGINX_RELOAD_UNIT_SOURCE_DIR="${SCRIPT_DIR}/nginx"
 NGINX_SITE_SOURCE=""
 # Unlike the nginx sources above, this has no per-installation override -
 # agentgateway/config.yaml is installation-agnostic by design (every
@@ -368,7 +388,9 @@ AGENTGATEWAY_CONFIG_SOURCE="${SCRIPT_DIR}/agentgateway/config.yaml"
 AUTHENTIK_ICONS_SOURCE_DIR="${SCRIPT_DIR}/docker/authentik/icons"
 INSTALLATION=""
 INSTALLATION_DIR=""
-LOCK_FILE="/tmp/ai-stand-apply.lock"
+# Under /run/lock, not /tmp: the controller container mounts the host's /run/lock, so a stage it runs and a stage the
+# operator runs on the host exclude each other.
+LOCK_FILE="${AI_STAND_LOCK_FILE:-/run/lock/ai-stand-apply.lock}"
 REBOOT_MARKER="/var/lib/ai-stand/reboot-required"
 RUN_TS="$(date +%Y%m%d-%H%M%S)"
 NGINX_BACKED_UP="0"
@@ -376,6 +398,8 @@ SWARM_RECOVERED="0"
 
 COMMAND="all"
 COMMAND_SET="0"
+CREDENTIALS_ACTION=""
+CREDENTIALS_NAME=""
 NODE_NAME=""
 HOST_IP=""
 PEER_IP=""
@@ -405,20 +429,29 @@ die() {
 
 usage() {
   cat <<USAGE
-Usage: $0 [preflight|host|images|deploy|reconcile-mcp|migrate-metamcp-tenants|configure-authentik|onboard-readonly-mcp-user|configure-portainer|verify|credentials|all] [options]
+Usage: $0 [preflight|host|images|deploy-models|configure-model-routing|deploy|templates|reconcile-mcp|configure-authentik|configure-gitea|configure-gitea-ssh-sync|cleanup-legacy-gitea-ssh-sync|deploy-controller|configure-ssh-key-delivery|cleanup-legacy-host-timers|onboard-readonly-mcp-user|configure-portainer|verify|credentials|all] [options]
 
 Commands:
   preflight              Check host prerequisites without changing state.
   host                   Install/configure host prerequisites, storage, TLS, firewall, Nginx and labels.
   images                 Build/pull required images for the selected accelerator.
+  deploy-models          Submit only the four isolated model services, preserving consumer/control-plane state.
+  configure-model-routing  Replace only Agentgateway model routing, preserving personal MCP routes during maintenance.
   deploy                 Validate and deploy the Swarm stack.
+  templates              Idempotently publish the managed C# and Python Coder templates.
   reconcile-mcp          Apply an already rendered read-only MCP manifest; intended for the root-owned timer only.
   configure-authentik    Idempotently configure Authentik groups and OIDC applications.
+  configure-gitea        Configure native Gitea OIDC after Authentik reconciliation.
+  configure-gitea-ssh-sync  Issue the SSH-key synchronizer's credentials and deploy it (after configure-gitea).
+  cleanup-legacy-gitea-ssh-sync  Remove the host-installed predecessor of the SSH-key synchronizer (after the service ran).
+  deploy-controller      Deploy only the controller and cert-receiver services (the recurring jobs); nothing else changes.
+  configure-ssh-key-delivery  Issue the SSH private-key delivery credentials and deploy it (Coder workspaces get their member's key).
+  cleanup-legacy-host-timers  Remove the host timers and scripts the controller container replaced (after its jobs ran).
   onboard-readonly-mcp-user  Idempotently create (or verify) one Authentik user and its group membership.
-  migrate-metamcp-tenants  One-time reviewed email-to-(issuer,sub) ownership migration for existing MetaMCP users.
   configure-portainer    Idempotently initialize Portainer admin and enable Authentik OAuth/OIDC.
   verify                 Verify services, routing and protection rules.
-  credentials            Print the generated Authentik/Portainer/OpenClaw credentials for this installation.
+  credentials list       List known root-only generated credential files without values.
+  credentials show NAME  Print one explicitly requested credential value to stdout.
   all                    Run preflight, host, images, deploy, configure-authentik, configure-portainer and verify. This is the default.
 
 Options:
@@ -435,23 +468,35 @@ Options:
   -h, --help                 Show this help.
 
 Examples:
-  sudo bash apply.sh all --installation kurkin-family__labs__m01 --node-name ai01 --host-ip <ai01-ip> --peer-ip <ai02-ip> --trusted-cidr <trusted-cidr> --accelerator auto
-  sudo bash apply.sh host --installation kurkin-family__labs__m01 --node-name ai02 --host-ip <ai02-ip> --peer-ip <ai01-ip> --trusted-cidr <trusted-cidr> --manager-join-token <token>
-  sudo bash apply.sh images --installation kurkin-family__labs__m01 --node-name ai02
-  sudo bash apply.sh onboard-readonly-mcp-user --installation kurkin-family__labs__m01 --node-name ai01 --username <username> --email <email> --groups ai-users
+  sudo bash apply.sh all --installation <installation> --node-name ai01 --host-ip <ai01-ip> --peer-ip <ai02-ip> --trusted-cidr <trusted-cidr> --accelerator auto
+  sudo bash apply.sh host --installation <installation> --node-name ai02 --host-ip <ai02-ip> --peer-ip <ai01-ip> --trusted-cidr <trusted-cidr> --manager-join-token <token>
+  sudo bash apply.sh images --installation <installation> --node-name ai02
+  sudo bash apply.sh onboard-readonly-mcp-user --installation <installation> --node-name ai01 --username <username> --email <email> --groups ai-users
+  sudo bash apply.sh credentials list --installation <installation>
 USAGE
 }
 
 parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      preflight|host|images|deploy|reconcile-mcp|migrate-metamcp-tenants|configure-authentik|onboard-readonly-mcp-user|configure-portainer|verify|credentials|all)
+      preflight|host|images|deploy-models|configure-model-routing|deploy|templates|reconcile-mcp|configure-authentik|configure-gitea|configure-gitea-ssh-sync|cleanup-legacy-gitea-ssh-sync|deploy-controller|configure-ssh-key-delivery|cleanup-legacy-host-timers|onboard-readonly-mcp-user|configure-portainer|verify|credentials|all)
         if [ "$COMMAND_SET" = "1" ]; then
           die "Only one command can be specified"
         fi
         COMMAND="$1"
         COMMAND_SET="1"
         shift
+        ;;
+      list|show)
+        [ "$COMMAND" = "credentials" ] && [ -z "$CREDENTIALS_ACTION" ] \
+          || die "credentials accepts exactly one of: list, show <name>"
+        CREDENTIALS_ACTION="$1"
+        shift
+        if [ "$CREDENTIALS_ACTION" = "show" ]; then
+          [ "$#" -ge 1 ] || die "credentials show requires a credential name"
+          CREDENTIALS_NAME="$1"
+          shift
+        fi
         ;;
       --installation)
         [ "$#" -ge 2 ] || die "--installation requires a value"
@@ -553,6 +598,10 @@ parse_args() {
         ;;
     esac
   done
+  if [ "$COMMAND" = "credentials" ]; then
+    [ -n "$CREDENTIALS_ACTION" ] || CREDENTIALS_ACTION="list"
+    [ "$#" -eq 0 ] || die "Unexpected arguments after credentials command"
+  fi
 }
 
 validate_readonly_mcp_path_prefix() {
@@ -602,6 +651,23 @@ validate_readonly_mcp_runtime_override_permissions() {
     || die "Read-only MCP runtime override must be root:root with mode 0600"
 }
 
+# With a real certificate domain every public name must sit one label below it: the wildcard certificate covers nothing else.
+# A name left at its ".local" default next to a real domain is the typical result of a half-edited profile.
+validate_public_host_names() {
+  [ "$CERT_DOMAIN" != "local" ] || return 0
+  [[ "$CERT_DOMAIN" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] || die "CERT_DOMAIN must be a DNS domain name"
+  local -a names=(AI01_HOST AI02_HOST OPENWEBUI_HOST OPENCLAW_HOST PORTAINER_HOST AUTHENTIK_HOST AGENTGATEWAY_HOST)
+  [ "${CODER_ENABLED:-0}" != "1" ] || names+=(CODER_HOST)
+  [ "${GITEA_ENABLED:-0}" != "1" ] || names+=(GITEA_HOST)
+  local name value label
+  for name in "${names[@]}"; do
+    value="${!name}"
+    label="${value%".${CERT_DOMAIN}"}"
+    { [ "$label" != "$value" ] && [[ "$label" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; } \
+      || die "${name} is '${value}'; with CERT_DOMAIN=${CERT_DOMAIN} it must be <name>.${CERT_DOMAIN} (set it in the installation profile)"
+  done
+}
+
 load_installation() {
   [ -n "$INSTALLATION" ] || die "--installation is required"
   case "$INSTALLATION" in
@@ -614,24 +680,91 @@ load_installation() {
   local installation_file="${INSTALLATION_DIR}/installation.sh"
   [ -r "$installation_file" ] || die "Installation config is missing: ${installation_file}"
 
+  CERT_DIR=""
   # shellcheck disable=SC1090
   . "$installation_file"
+  # A profile copied from another installation keeps that installation's name, and with it its storage and state paths.
+  [ "${INSTALLATION_NAME:-}" = "$INSTALLATION" ] \
+    || die "INSTALLATION_NAME in ${installation_file} is '${INSTALLATION_NAME:-}', it must equal the directory name '${INSTALLATION}'"
+  define_storage_paths
+  # The compose files take the time zone from here. The service identity is not an installation value: the images' users,
+  # llamacpp/runtime.py and verify all assume 10000:20000.
+  [ "${IM_UID:-}" = "10000" ] && [ "${IM_GID:-}" = "20000" ] || die "IM_UID and IM_GID are fixed by the images at 10000 and 20000"
+  [[ "${IM_TZ:-}" =~ ^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+){0,2}$ ]] || die "IM_TZ must be a time zone name such as Europe/Moscow"
+  export IM_TZ
+  validate_public_host_names
 
   validate_readonly_mcp_path_prefix "$READONLY_MCP_PATH_PREFIX"
   load_readonly_mcp_runtime_override
 
-  case "${GIGACODE_SUBSCRIPTION_ENABLED:-0}" in
-    0|1) ;;
-    *) die "GIGACODE_SUBSCRIPTION_ENABLED must be 0 or 1" ;;
-  esac
-  if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then
-    SERVICES+=("${STACK_NAME}_gigacode-identity-broker" "${STACK_NAME}_openclaw-gigacode-adapter")
-  fi
+  local gfx_instance gfx_key image_key gfx_value
+  for gfx_instance in 01 02; do
+    gfx_key="AI${gfx_instance}_ROCM_GFX_VERSION"
+    image_key="LLAMACPP${gfx_instance}_AMD_IMAGE"
+    gfx_value="${!gfx_key:-${AMD_ROCM_GFX_VERSION:-}}"
+    if [ -n "$gfx_value" ]; then
+      [[ "$gfx_value" =~ ^gfx[0-9a-f]{3,5}$ ]] || die "Invalid AMD GFX architecture for ai${gfx_instance}"
+      printf -v "$gfx_key" '%s' "$gfx_value"
+      printf -v "$image_key" '%s' "ghcr.io/kukurusik/ai-stand-llamacpp:${LLAMACPP_IMAGE_VERSION}-amd-${gfx_value}"
+    fi
+  done
 
   case "${READONLY_MCP_ENABLED:-0}" in
     0|1) ;;
     *) die "READONLY_MCP_ENABLED must be 0 or 1" ;;
   esac
+
+  case "${GITEA_ENABLED:-0}" in
+    0|1) ;;
+    *) die "GITEA_ENABLED must be 0 or 1" ;;
+  esac
+  if [ "${GITEA_ENABLED}" = "1" ]; then
+    [[ "${GITEA_HOST}" =~ ^[a-z0-9][a-z0-9.-]{0,251}[a-z0-9]$ ]] \
+      || die "GITEA_HOST must be a DNS hostname"
+    [[ "${GITEA_SSH_PORT}" =~ ^[0-9]{1,5}$ ]] \
+      && [ "${GITEA_SSH_PORT}" -ge 1 ] && [ "${GITEA_SSH_PORT}" -le 65535 ] \
+      || die "GITEA_SSH_PORT must be in the range 1..65535"
+    SERVICES+=("${STACK_NAME}_gitea" "${STACK_NAME}_gitea-postgresql")
+    PUBLIC_PORTS+=("${GITEA_SSH_PORT}")
+  fi
+
+  case "${GITEA_SSH_SYNC_ENABLED:-0}" in
+    0|1) ;;
+    *) die "GITEA_SSH_SYNC_ENABLED must be 0 or 1" ;;
+  esac
+  case "${GITEA_SSH_SYNC_APPLY:-1}" in
+    0|1) ;;
+    *) die "GITEA_SSH_SYNC_APPLY must be 0 (plan only) or 1" ;;
+  esac
+  if [ "${GITEA_SSH_SYNC_ENABLED:-0}" = "1" ]; then
+    [ "${GITEA_ENABLED:-0}" = "1" ] || die "GITEA_SSH_SYNC_ENABLED requires GITEA_ENABLED=1"
+    SERVICES+=("${STACK_NAME}_gitea-ssh-sync")
+  fi
+
+  case "${SSH_KEY_DELIVERY_ENABLED:-0}" in
+    0|1) ;;
+    *) die "SSH_KEY_DELIVERY_ENABLED must be 0 or 1" ;;
+  esac
+  if [ "${SSH_KEY_DELIVERY_ENABLED:-0}" = "1" ]; then
+    [ "${CODER_ENABLED:-0}" = "1" ] || die "SSH_KEY_DELIVERY_ENABLED requires CODER_ENABLED=1"
+    SERVICES+=("${STACK_NAME}_ssh-key-sender" "${STACK_NAME}_ssh-key-receiver")
+  fi
+
+  case "${CONTROLLER_ENABLED:-1}" in
+    0|1) ;;
+    *) die "CONTROLLER_ENABLED must be 0 or 1" ;;
+  esac
+  case "${CERTBOT_RECEIVER_ENABLED:-0}" in
+    0|1) ;;
+    *) die "CERTBOT_RECEIVER_ENABLED must be 0 or 1" ;;
+  esac
+  if [ "${CONTROLLER_ENABLED}" = "1" ]; then
+    SERVICES+=("${STACK_NAME}_controller")
+    if [ "${CERTBOT_RECEIVER_ENABLED}" = "1" ]; then
+      [ "${CERTBOT_ENABLED:-0}" = "1" ] || die "CERTBOT_RECEIVER_ENABLED requires CERTBOT_ENABLED=1"
+      SERVICES+=("${STACK_NAME}_cert-receiver")
+    fi
+  fi
 
   if [ "${#cli_trusted_cidrs[@]}" -gt 0 ]; then
     TRUSTED_CIDRS=("${cli_trusted_cidrs[@]}")
@@ -687,6 +820,12 @@ validate_args() {
   esac
 
   case "$COMMAND" in
+    credentials)
+      [ "$COMMAND_SET" = "1" ] || die "credentials is a local secret-inspection command"
+      [ -z "$NODE_NAME" ] && [ -z "$HOST_IP" ] && [ -z "$PEER_IP" ] \
+        || die "credentials list/show does not accept node, network or deployment options"
+      return 0
+      ;;
     images)
       if [ -n "$HOST_IP" ]; then
         validate_ipv4 "$HOST_IP" || die "--host-ip must be an IPv4 address"
@@ -696,7 +835,7 @@ validate_args() {
       fi
       return 0
       ;;
-    reconcile-mcp)
+    deploy-models|configure-model-routing|reconcile-mcp|configure-gitea|configure-gitea-ssh-sync|cleanup-legacy-gitea-ssh-sync|deploy-controller|configure-ssh-key-delivery|cleanup-legacy-host-timers)
       # The root-owned timer invokes only the narrow dynamic overlay stage.
       # It neither configures host networking nor touches the Swarm control
       # plane, therefore host/peer/trusted CIDR arguments are intentionally
@@ -725,7 +864,7 @@ validate_args() {
   validate_ipv4 "$HOST_IP" || die "--host-ip must be an IPv4 address"
   validate_ipv4 "$PEER_IP" || die "--peer-ip must be an IPv4 address"
 
-  local trusted_cidr
+  local trusted_cidr port
   for trusted_cidr in "${TRUSTED_CIDRS[@]}"; do
     validate_ipv4_cidr "$trusted_cidr" || die "--trusted-cidr must be an IPv4 CIDR (address/mask, e.g. 10.20.0.0/24)"
   done
@@ -875,6 +1014,36 @@ ensure_base_packages() {
     pciutils \
     software-properties-common \
     util-linux
+}
+
+ensure_nginx_repo() {
+  local key_ascii key_binary source_tmp preference_tmp
+  key_ascii="$(mktemp)"; key_binary="$(mktemp)"
+  source_tmp="$(mktemp)"; preference_tmp="$(mktemp)"
+  curl --fail --show-error --silent --location --proto '=https' \
+    https://nginx.org/keys/nginx_signing.key --output "$key_ascii"
+  gpg --batch --with-colons --show-keys "$key_ascii" 2>/dev/null \
+    | awk -F: '$1 == "fpr" { print $10 }' \
+    | grep -Fxq "$NGINX_SIGNING_FINGERPRINT" \
+    || die "Unexpected official Nginx signing key"
+  gpg --batch --yes --dearmor --output "$key_binary" "$key_ascii"
+  printf '%s\n' \
+    'Types: deb' \
+    'URIs: https://nginx.org/packages/ubuntu/' \
+    "Suites: ${OS_CODENAME}" \
+    'Components: nginx' \
+    'Signed-By: /usr/share/keyrings/ai-stand-nginx.gpg' > "$source_tmp"
+  printf '%s\n' 'Package: nginx nginx-module-*' 'Pin: release o=nginx' \
+    'Pin-Priority: 900' > "$preference_tmp"
+  install_if_changed "$key_binary" /usr/share/keyrings/ai-stand-nginx.gpg 0644 root root
+  install_if_changed "$source_tmp" /etc/apt/sources.list.d/ai-stand-nginx.sources 0644 root root
+  install_if_changed "$preference_tmp" /etc/apt/preferences.d/ai-stand-nginx 0644 root root
+  rm -f -- "$key_ascii" "$key_binary" "$source_tmp" "$preference_tmp"
+  run_root apt-get update
+  run_root env DEBIAN_FRONTEND=noninteractive apt-get \
+    -o Dpkg::Options::=--force-confold install --yes "nginx=${NGINX_VERSION}-1~${OS_CODENAME}"
+  [ "$(nginx -v 2>&1)" = "nginx version: nginx/${NGINX_VERSION}" ] \
+    || die "Nginx release mismatch after installation"
 }
 
 ensure_docker_repo() {
@@ -1085,8 +1254,11 @@ validate_accelerator_compatibility() {
   # below if that's ever needed.
   local accelerator="$1"
 
-  if [ "$accelerator" = "amd" ] && [ "$OS_VERSION_ID" = "26.04" ]; then
-    die "AMD accelerator on Ubuntu 26.04 is unsupported by this installer; use Ubuntu 24.04 or --accelerator cpu/nvidia"
+  if [ "$accelerator" = "amd" ]; then
+    case "$OS_VERSION_ID" in
+      24.04|26.04) ;;
+      *) die "AMD ROCm ${AMD_ROCM_RELEASE} is supported here only on Ubuntu 24.04 or 26.04" ;;
+    esac
   fi
 
   if [ "$ACCELERATOR" = "amd" ] && command_exists lspci; then
@@ -1167,25 +1339,26 @@ amd_gpu_ready() {
 ensure_amd_kernel() {
   validate_accelerator_compatibility amd
 
-  # gfx1151 (Strix Halo/Ryzen AI Max+ PRO 395) hits an unresolved amdgpu/ROCm
-  # queue-eviction crash ("Freeing queue vital buffer..., queue evicted")
-  # under real inference load on kernels below 7.0, regardless of ROCm
-  # release, GTT/TTM tuning, or even switching LM Studio to the Vulkan
-  # (Mesa RADV, non-ROCm/HIP) runtime on its own - confirmed 2026-09-06 (see
-  # project_ai_stand_gpu_crash_investigation memory notes) that only kernel
-  # >=7.0 together with Vulkan avoids it. linux-generic-hwe-24.04 provides
-  # that kernel on Ubuntu 24.04 (same kernel Ubuntu 26.04 ships as GA)
-  # without a full distro upgrade. This is required, not optional, for
-  # accelerator=amd - skipping it silently reproduces the crash.
+  # Historical gfx1151 queue-eviction failures require a kernel >=7.0.
+  # This prerequisite is not evidence that a particular ROCm inference
+  # configuration is safe: the native image still needs its own GPU canary.
+  # Current AMD deployments are ROCm-only; historical Vulkan workarounds
+  # in issues/ are not runtime-selection policy or an allowed fallback.
   local kernel_major
   kernel_major="$(uname -r | cut -d. -f1)"
 
   if [ "$kernel_major" -lt 7 ]; then
-    if ! dpkg -s linux-generic-hwe-24.04 >/dev/null 2>&1; then
-      log "Installing linux-generic-hwe-24.04 (running kernel $(uname -r) is older than the minimum 7.0 required to avoid a known gfx1151 GPU crash under load)"
-      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y linux-generic-hwe-24.04
+    local kernel_package
+    case "$OS_VERSION_ID" in
+      24.04) kernel_package="linux-generic-hwe-24.04" ;;
+      26.04) kernel_package="linux-generic" ;;
+      *) die "Cannot select an AMD kernel meta-package for Ubuntu ${OS_VERSION_ID}" ;;
+    esac
+    if ! dpkg -s "$kernel_package" >/dev/null 2>&1; then
+      log "Installing ${kernel_package} (running kernel $(uname -r) is older than the minimum 7.0 required for AMD ROCm)"
+      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y "$kernel_package"
     fi
-    mark_reboot_required "linux-generic-hwe-24.04 installed to reach kernel >=7.0 (running kernel is still $(uname -r))"
+    mark_reboot_required "${kernel_package} installed to reach kernel >=7.0 (running kernel is still $(uname -r))"
   fi
 
   log "Running kernel $(uname -r) satisfies the >=7.0 requirement for accelerator=amd"
@@ -1208,20 +1381,39 @@ ensure_amd_driver() {
   # installation profile sets this explicitly per node instead.
   [ -n "${AMD_ROCM_GFX_VERSION:-}" ] || die "AMD_ROCM_GFX_VERSION must be set for accelerator=amd (e.g. gfx1151, gfx1103 - see https://rocm.docs.amd.com's per-model GPU picker)"
 
-  if ! amd_gpu_ready; then
-    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      "linux-headers-$(uname -r)" || true
-
-    local deb_tmp
+  # The installer owns the matching apt repository metadata. Upgrade it even
+  # when the inbox amdgpu device is already healthy: hosts upgraded from
+  # Ubuntu 24.04 otherwise retain 31.50 and can silently restore old repo
+  # definitions during later maintenance.
+  local amdgpu_installer_version deb_tmp
+  amdgpu_installer_version="$(dpkg-query -W -f='${Version}' amdgpu-install 2>/dev/null || true)"
+  # AMD's package version includes two zero components before the build
+  # number (for example 31.60.0.0.31600000-2407772.26.04).  Match the
+  # release line and build family rather than an invented shortened form,
+  # so an already-correct installer is not needlessly reinstalled.
+  if [[ ! "$amdgpu_installer_version" == 31.60.*316000* ]]; then
     deb_tmp="$(mktemp --suffix=.deb)"
     curl --fail --show-error --silent --location \
       "$AMD_AMDGPU_INSTALL_URL" \
       --output "$deb_tmp"
     echo "${AMD_AMDGPU_INSTALL_SHA256}  ${deb_tmp}" | sha256sum --check --strict \
       || die "amdgpu-install package checksum mismatch: $AMD_AMDGPU_INSTALL_URL"
-    run_root apt-get install -y "$deb_tmp"
+    # The installer package owns several APT source files.  On an upgraded
+    # host dpkg may otherwise ask an interactive conffile question while
+    # applying this local .deb, leaving the unattended host stage blocked
+    # indefinitely.  Keep the current, managed files until the following
+    # explicit renderer replaces them with the release-specific sources.
+    run_root env DEBIAN_FRONTEND=noninteractive apt-get \
+      -o Dpkg::Options::=--force-confdef \
+      -o Dpkg::Options::=--force-confold \
+      install -y "$deb_tmp"
     rm -f "$deb_tmp"
     run_root apt-get update
+  fi
+
+  if ! amd_gpu_ready; then
+    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      "linux-headers-$(uname -r)" || true
 
     # Ryzen APUs use the kernel's own inbox amdgpu driver (confirmed via
     # AMD's per-model install picker with fam=ryzen); no DKMS build needed.
@@ -1232,7 +1424,10 @@ ensure_amd_driver() {
     fi
   fi
 
-  if ! run_root test -f /etc/apt/sources.list.d/amdrocm-stable.sources; then
+  # Always render this source. A 24.04 entry left by a previous deployment is
+  # invalid after a host upgrade to Ubuntu 26.04 and must never survive just
+  # because the file already exists.
+  {
     local key_tmp
     local sources_tmp
     key_tmp="$(mktemp)"
@@ -1248,7 +1443,7 @@ ensure_amd_driver() {
     printf '%s\n' \
       "X-Repo-Id: amdrocm-stable" \
       "Types: deb" \
-      "URIs: https://stable.repo.amd.com/rocm/core/packages/ubuntu2404/" \
+      "URIs: https://stable.repo.amd.com/rocm/core/packages/ubuntu2604/" \
       "Suites: stable" \
       "Components: main" \
       "Architectures: amd64" \
@@ -1258,10 +1453,24 @@ ensure_amd_driver() {
     write_root_file_if_changed "$sources_tmp" /etc/apt/sources.list.d/amdrocm-stable.sources 0644
     rm -f "$sources_tmp"
     run_root apt-get update
-  fi
+  }
 
   run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
     "amdrocm${AMD_ROCM_RELEASE}-${AMD_ROCM_GFX_VERSION}"
+
+  # APT permits ROCm 10.0 and 10.1 to coexist after a distribution upgrade.
+  # That leaves competing /opt/rocm alternatives and makes an ostensibly
+  # 10.1 runtime non-deterministic. Purge only installed package *names* from
+  # the retired 10.0 line after the 10.1 metapackage is known installed.
+  local -a stale_rocm_packages=()
+  local package
+  while IFS= read -r package; do
+    [ -n "$package" ] && stale_rocm_packages+=("$package")
+  done < <(dpkg-query -W -f='${binary:Package}\n' 'amdrocm*10.0*' 2>/dev/null || true)
+  if [ "${#stale_rocm_packages[@]}" -gt 0 ]; then
+    run_root env DEBIAN_FRONTEND=noninteractive apt-get purge -y "${stale_rocm_packages[@]}"
+    run_root env DEBIAN_FRONTEND=noninteractive apt-get autoremove -y
+  fi
   run_root usermod -a -G render,video "$(whoami)"
 
   log "AMD GPU driver (amdrocm${AMD_ROCM_RELEASE}-${AMD_ROCM_GFX_VERSION}) is available"
@@ -1428,9 +1637,9 @@ check_docker_preflight() {
 }
 
 check_disk() {
-  local disk_path="/mnt/storage"
+  local disk_path="$STORAGE_ROOT"
   if [ ! -d "$disk_path" ]; then
-    disk_path="/mnt"
+    disk_path="$(dirname "$STORAGE_ROOT")"
   fi
   if [ ! -d "$disk_path" ]; then
     disk_path="/"
@@ -1470,7 +1679,10 @@ local_service_domains() {
       # unauthenticated check against it belongs with
       # check_agentgateway_llm_auth() in cmd_verify(), not the generic
       # bare-success loop this list feeds.
-      printf '%s\n' "$OPENWEBUI_HOST" "$PORTAINER_HOST" "$METAMCP_HOST"
+      printf '%s\n' "$OPENWEBUI_HOST" "$PORTAINER_HOST"
+      if [ "${GITEA_ENABLED:-0}" = "1" ]; then
+        printf '%s\n' "$GITEA_HOST"
+      fi
       ;;
     ai02)
       # A trusted-proxy OpenClaw deliberately redirects an unauthenticated
@@ -1557,14 +1769,14 @@ check_node_dns() {
     fi
   done
 
-  if [ "$NODE_NAME" = "ai01" ]; then
-    check_dns "$AUTHENTIK_HOST" "$HOST_IP"
-    # Not part of local_service_domains() (see its own comment) - checked
-    # here directly, same as AUTHENTIK_HOST above.
-    check_dns "$AGENTGATEWAY_HOST" "$HOST_IP"
-  else
-    check_dns "$AUTHENTIK_HOST" "$PEER_IP"
-  fi
+  # Authentik and Agentgateway are pinned to ai01. Validate their actual
+  # ingress IP from either host instead of incorrectly expecting the ai02
+  # preflight to resolve them to itself.
+  check_dns "$AUTHENTIK_HOST" "$AI01_IP"
+  # Not part of local_service_domains() (see its own comment) because the
+  # full Agentgateway surface is authenticated, but its DNS is still a hard
+  # deployment prerequisite.
+  check_dns "$AGENTGATEWAY_HOST" "$AI01_IP"
 }
 
 cert_valid() {
@@ -1573,7 +1785,9 @@ cert_valid() {
 
   run_root test -r "$fullchain" || return 1
   run_root test -r "$privkey" || return 1
-  run_root openssl x509 -in "$fullchain" -noout -checkend 604800 >/dev/null || return 1
+  # Only an expired certificate is invalid here. One that is merely close to
+  # expiry must not block the host stage, which is what installs its renewal.
+  run_root openssl x509 -in "$fullchain" -noout -checkend 0 >/dev/null || return 1
   run_root openssl x509 -in "$fullchain" -noout -ext subjectAltName \
     | grep -q "DNS:\\*.${CERT_DOMAIN}"
 }
@@ -1583,8 +1797,9 @@ check_cert_preflight() {
   local privkey="${CERT_DIR}/privkey.pem"
 
   if run_root_no_prompt test -r "$fullchain" >/dev/null 2>&1 && run_root_no_prompt test -r "$privkey" >/dev/null 2>&1; then
-    if run_root_no_prompt openssl x509 -in "$fullchain" -noout -checkend 604800 >/dev/null 2>&1; then
+    if run_root_no_prompt openssl x509 -in "$fullchain" -noout -checkend 0 >/dev/null 2>&1; then
       log "TLS certificate exists; host command will validate SAN before Nginx reload"
+      warn_cert_expiring
     else
       die "Existing TLS certificate is expired or invalid: ${fullchain}"
     fi
@@ -1595,12 +1810,21 @@ check_cert_preflight() {
   fi
 }
 
+# A certificate under 21 days from expiry means renewal is not working (certbot
+# renews at 30 days). Loud, but never a reason to stop a stage.
+warn_cert_expiring() {
+  if ! run_root_no_prompt openssl x509 -in "${CERT_DIR}/fullchain.pem" -noout -checkend 1814400 >/dev/null 2>&1; then
+    warn "TLS certificate $(run_root_no_prompt openssl x509 -in "${CERT_DIR}/fullchain.pem" -noout -enddate 2>/dev/null) is under 21 days away: renewal is not working (see certbot/README.md)"
+  fi
+}
+
 ensure_tls_cert() {
   local fullchain="${CERT_DIR}/fullchain.pem"
   local privkey="${CERT_DIR}/privkey.pem"
 
   if cert_valid; then
     log "TLS certificate is valid and covers *.${CERT_DOMAIN}"
+    warn_cert_expiring
     return 0
   fi
 
@@ -1617,7 +1841,7 @@ ensure_tls_cert() {
     -sha256 \
     -days 825 \
     -subj "/CN=*.${CERT_DOMAIN}" \
-    -addext "subjectAltName=DNS:*.${CERT_DOMAIN},DNS:${CERT_DOMAIN},DNS:authentik.${CERT_DOMAIN},DNS:lmstudio.${CERT_DOMAIN},DNS:lmstudio-proxy.${CERT_DOMAIN},DNS:openwebui.${CERT_DOMAIN},DNS:openclaw.${CERT_DOMAIN},DNS:portainer.${CERT_DOMAIN}" \
+    -addext "subjectAltName=DNS:*.${CERT_DOMAIN},DNS:${CERT_DOMAIN},DNS:authentik.${CERT_DOMAIN},DNS:openwebui.${CERT_DOMAIN},DNS:openclaw.${CERT_DOMAIN},DNS:portainer.${CERT_DOMAIN}" \
     -keyout "$privkey" \
     -out "$fullchain" >/dev/null 2>&1
   run_root chmod 0600 "$privkey"
@@ -1659,7 +1883,16 @@ mark_existing_openclaw_component_owned() {
   # first, then add only the marker that lets storage migration recognise the
   # component on later runs.
   run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$path"
-  if [ "$component_name" = "sandbox DIND" ]; then
+  if [ "$component_name" = "Gateway" ]; then
+    # OpenClaw 2026.10.2 deliberately keeps its two managed npm plugin
+    # generations root-owned and immutable to the runtime user. Validate
+    # those exact namespaces without following links; every other state or
+    # workspace path must retain APP_UID:APP_GID ownership.
+    run_root python3 "${SCRIPT_DIR}/docker/openclaw/validate-gateway-ownership.py" \
+      --gateway-root "$path" --uid "$APP_UID" --gid "$APP_GID" \
+      || die "OpenClaw Gateway ownership conflict; refusing to recursively chown persistent data."
+    unexpected_path=""
+  elif [[ "$component_name" == sandbox\ DIND* ]]; then
     # Docker's *inner* daemon is deliberately privileged inside its own
     # isolated DIND container. It creates these small implementation-owned
     # root entries (including a block-device marker) even though the mounted
@@ -1698,64 +1931,54 @@ mark_existing_openclaw_component_owned() {
   fi
 }
 
-ensure_openclaw_sandbox_workspace_root() {
-  local unexpected_path
+ensure_openclaw_docker_sandbox_storage() {
+  local path unexpected_path ownership mode
 
-  # Do not use ensure_owned_data_dir() here: its recovery path recursively
-  # chowns a component. Sandboxes may contain user repositories, and an
-  # ownership drift in one must be diagnosed rather than silently rewritten.
-  run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$OPENCLAW_SANDBOX_WORKSPACE_ROOT"
-  unexpected_path="$(
-    run_root find "$OPENCLAW_SANDBOX_WORKSPACE_ROOT" -xdev \
-      \( ! -uid "$APP_UID" -o ! -gid "$APP_GID" \) \
-      -print -quit 2>/dev/null || true
-  )"
-  [ -z "$unexpected_path" ] || die "OpenClaw sandbox workspace ownership conflict at ${unexpected_path}; expected ${APP_UID}:${APP_GID}. Refusing to recursively chown user workspace data."
-
-  log "OpenClaw sandbox workspace root is ready at ${OPENCLAW_SANDBOX_WORKSPACE_ROOT}"
-}
-
-ensure_openclaw_gigacode_requester_state() {
-  [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ] || return 0
-  [ "$NODE_NAME" = "ai02" ] || return 0
-
-  # Do not run a recursive repair here.  This directory is written by the
-  # unprivileged OpenClaw plugin at runtime; unexpected ownership could turn
-  # a host file into a confused-deputy identity map.
-  #
-  # The file's mode is 0750, not the tighter 0640 an identity-mapping file
-  # would otherwise get elsewhere in this script (e.g. the .ai-stand-owner
-  # markers above) - confirmed live 2026-09-23 that this host runs a
-  # pre-existing, outside-this-repo root cron every 5 minutes
-  # (/mnt/fix.sh: `chmod -R 750 /mnt/storage/*-data`) that unconditionally
-  # reasserts 0750 on everything under /mnt/storage/openclaw-data,
-  # this directory included. Fighting it back to 0640 on every apply.sh run
-  # just means this check fails intermittently depending on how recently
-  # cron last fired, for no real security gain: 0750 vs 0640 grant the
-  # identical owner/group read-write access for a plain data file neither
-  # mode ever executes, the only difference is an inert execute bit.
-  run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$OPENCLAW_GIGACODE_REQUESTER_DIR"
-  if ! run_root test -e "$OPENCLAW_GIGACODE_SESSION_MAP"; then
-    printf '%s\n' '{"version":1,"entries":{}}' | run_root tee "$OPENCLAW_GIGACODE_SESSION_MAP" >/dev/null
-    run_root chown "$APP_UID:$APP_GID" "$OPENCLAW_GIGACODE_SESSION_MAP"
-    run_root chmod 0750 "$OPENCLAW_GIGACODE_SESSION_MAP"
-  fi
-  local ownership
-  ownership="$(run_root stat -c '%u:%g:%a' "$OPENCLAW_GIGACODE_REQUESTER_DIR" "$OPENCLAW_GIGACODE_SESSION_MAP")"
-  [ "$ownership" = "${APP_UID}:${APP_GID}:750
-${APP_UID}:${APP_GID}:750" ] \
-    || die "OpenClaw GigaCode requester state must be ${APP_UID}:${APP_GID} with mode 0750"
+  # The Docker backend is scoped per agent. These roots contain user Git
+  # repositories and MEMORY.md files, so unexpected ownership is a hard
+  # error, never an invitation to recursively chown user data.
+  for path in \
+    "${OPENCLAW_DOCKER_SANDBOX_WORKSPACE_ROOT}/main" \
+    "${OPENCLAW_DOCKER_SANDBOX_WORKSPACE_ROOT}/codex" \
+    "${OPENCLAW_DOCKER_SANDBOX_WORKSPACE_ROOT}/claude"; do
+    if ! run_root test -e "$path"; then
+      run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$path"
+    fi
+    ownership="$(run_root stat -c '%u:%g' "$path")"
+    mode="$(run_root stat -c '%a' "$path")"
+    [ "$ownership" = "${APP_UID}:${APP_GID}" ] && [ "$mode" = "750" ] \
+      || die "OpenClaw Docker sandbox root has unexpected ownership/mode at ${path}: ${ownership} ${mode}; expected ${APP_UID}:${APP_GID} 750"
+    unexpected_path="$(run_root find "$path" -xdev \( ! -uid "$APP_UID" -o ! -gid "$APP_GID" \) -print -quit 2>/dev/null || true)"
+    [ -z "$unexpected_path" ] \
+      || die "OpenClaw Docker sandbox ownership conflict at ${unexpected_path}; expected ${APP_UID}:${APP_GID}. Refusing to recursively chown user workspace data."
+  done
+  log "OpenClaw Docker sandbox roots are ready"
 }
 
 migrate_root_data_to_component() {
   local root="$1"
   local component="$2"
   local mode="$3"
-  local preserved_root_entry_pattern="${4:-}"
+  local -a preserved_root_entry_patterns=()
+  local -a migration_find_exclusions
   local component_name
   local old_entry
   local component_entry
+  local pattern
   component_name="${component##*/}"
+
+  # A component root may intentionally hold several managed siblings or
+  # recovery artifacts.  Honour every explicit exclusion argument: dropping
+  # a later one could move an active sandbox root as though it were legacy
+  # flat-layout data.
+  migration_find_exclusions=( ! -name "$component_name" ! -name ".ai-stand-owner" )
+  if [ "$#" -gt 3 ]; then
+    preserved_root_entry_patterns=("${@:4}")
+  fi
+  for pattern in "${preserved_root_entry_patterns[@]}"; do
+    [ -n "$pattern" ] || continue
+    migration_find_exclusions+=( ! -name "$pattern" )
+  done
 
   run_root install -d -m "$mode" -o "$APP_UID" -g "$APP_GID" "$root"
   run_root install -d -m "$mode" -o "$APP_UID" -g "$APP_GID" "$component"
@@ -1774,9 +1997,7 @@ migrate_root_data_to_component() {
     run_root find "$root" \
       -mindepth 1 \
       -maxdepth 1 \
-      ! -name "$component_name" \
-      ! -name ".ai-stand-owner" \
-      ! -name "$preserved_root_entry_pattern" \
+      "${migration_find_exclusions[@]}" \
       ! -exec test -f "{}/.ai-stand-owner" \; \
       -print \
       -quit 2>/dev/null || true
@@ -1798,9 +2019,7 @@ migrate_root_data_to_component() {
     run_root find "$root" \
       -mindepth 1 \
       -maxdepth 1 \
-      ! -name "$component_name" \
-      ! -name ".ai-stand-owner" \
-      ! -name "$preserved_root_entry_pattern" \
+      "${migration_find_exclusions[@]}" \
       ! -exec test -f "{}/.ai-stand-owner" \; \
       -exec mv -t "$component" -- {} +
 
@@ -1887,15 +2106,71 @@ ensure_authentik_data() {
 ensure_docker_secret() {
   local secret_name="$1"
   local bytes="$2"
+  local host_name="${secret_name#ai-stand-}" host_file="${AI_STAND_SECRETS_DIR}/${secret_name#ai-stand-}"
+  local service_name container_ids container_id target expected_hash actual_hash consumer_count local_node_name task_rows remote_node_count
+
+  case "$secret_name" in
+    "$AUTHENTIK_SECRET_KEY_SECRET") service_name="${STACK_NAME}_authentik-server" ;;
+    "$AUTHENTIK_POSTGRES_PASSWORD_SECRET") service_name="${STACK_NAME}_authentik-postgresql" ;;
+    *) die "No protected host source mapping exists for Docker secret ${secret_name}" ;;
+  esac
+  target="/run/secrets/${secret_name}"
 
   if docker_cmd secret inspect "$secret_name" >/dev/null 2>&1; then
-    log "Docker secret already exists: ${secret_name}"
+    container_ids="$(docker_cmd ps --filter "label=com.docker.swarm.service.name=${service_name}" --format '{{.ID}}')"
+    consumer_count="$(printf '%s\n' "$container_ids" | sed '/^$/d' | wc -l | tr -d ' ')"
+    if [ "$consumer_count" = "0" ] && [ "$READ_ONLY_VERIFY" = "1" ]; then
+      # Authentik is deliberately pinned to ai01. A Swarm Secret is cluster
+      # scoped, but the source file and its consumer are node-local; verifying
+      # ai02 must not attempt to copy or recreate ai01's signing/database
+      # credentials. Prove the exact single running consumer is remote before
+      # treating this secret as outside the local verification scope.
+      case "$secret_name" in
+        "$AUTHENTIK_SECRET_KEY_SECRET"|"$AUTHENTIK_POSTGRES_PASSWORD_SECRET") ;;
+        *) die "Cannot verify ${secret_name}: no local consumer and no approved remote owner" ;;
+      esac
+      local_node_name="$(docker_cmd info --format '{{.Name}}')"
+      [[ "$local_node_name" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]] \
+        || die "Cannot verify ${secret_name}: local Swarm node name is unavailable"
+      task_rows="$(docker_cmd service ps --filter desired-state=running --format '{{.Node}}|{{.CurrentState}}' "$service_name")"
+      remote_node_count="$(printf '%s\n' "$task_rows" | awk -F'|' -v local="$local_node_name" \
+        '$1 != "" && $1 != local && $2 ~ /^Running/ { n++ } END { print n+0 }')"
+      [ "$remote_node_count" = "1" ] \
+        || die "Cannot verify ${secret_name}: expected one exact remote Authentik consumer"
+      log "Docker secret is owned by the remote Authentik service; no node-local copy required: ${secret_name}"
+      return 0
+    fi
+    [ "$consumer_count" = "1" ] \
+      || die "Cannot safely persist/verify ${secret_name}: expected one active local consumer"
+    container_id="$(printf '%s\n' "$container_ids" | sed '/^$/d')"
+    if ! run_root test -s "$host_file"; then
+      [ "$READ_ONLY_VERIFY" != "1" ] \
+        || die "Read-only verification requires the existing protected source for ${secret_name}"
+      run_root install -d -m 0700 -o root -g root "$AI_STAND_SECRETS_DIR"
+      docker_cmd exec "$container_id" cat "$target" | run_root tee "$host_file" >/dev/null \
+        || die "Cannot persist existing ${secret_name} before continuing"
+      run_root chown root:root "$host_file"
+      run_root chmod 0600 "$host_file"
+    fi
+    if [ "$READ_ONLY_VERIFY" = "1" ]; then
+      local host_metadata
+      host_metadata="$(run_root stat -c '%F|%u|%g|%a|%h' -- "$host_file")" \
+        || die "Cannot inspect protected source metadata for ${secret_name}"
+      [ "$host_metadata" = "regular file|0|0|600|1" ] \
+        || die "Unsafe protected source metadata for ${secret_name}"
+    fi
+    expected_hash="$(run_root sha256sum "$host_file" | awk '{print $1}')"
+    actual_hash="$(docker_cmd exec "$container_id" cat "$target" | sha256sum | awk '{print $1}')"
+    [ -n "$expected_hash" ] && [ "$expected_hash" = "$actual_hash" ] \
+      || die "Protected host source differs from active Docker secret ${secret_name}; no rotation attempted"
+    log "Docker secret source persisted and verified: ${secret_name}"
     return 0
   fi
 
-  local secret_value
-  secret_value="$(openssl rand -base64 "$bytes" | tr -d '\n')"
-  printf '%s' "$secret_value" | docker_cmd secret create "$secret_name" - >/dev/null
+  [ "$READ_ONLY_VERIFY" != "1" ] \
+    || die "Read-only verification requires existing Docker secret ${secret_name}"
+  load_host_secret "$host_name" "$bytes" >/dev/null
+  run_root cat -- "$host_file" | docker_cmd secret create "$secret_name" - >/dev/null
   log "Created Docker secret: ${secret_name}"
 }
 
@@ -1918,6 +2193,18 @@ load_host_secret() {
   # password fields or file://-delivered secrets where any byte is fine.
   local encoding="${3:-base64}"
   local path="${AI_STAND_SECRETS_DIR}/${name}"
+
+  if [ "$READ_ONLY_VERIFY" = "1" ]; then
+    run_root test -s "$path" \
+      || die "Read-only verification requires existing protected credential: ${name}"
+    local metadata
+    metadata="$(run_root stat -c '%F|%u|%g|%a|%h' -- "$path")" \
+      || die "Cannot inspect protected credential metadata: ${name}"
+    [ "$metadata" = "regular file|0|0|600|1" ] \
+      || die "Unsafe protected credential metadata during read-only verification: ${name}"
+    run_root cat -- "$path"
+    return 0
+  fi
 
   if ! run_root test -s "$path"; then
     run_root install -d -m 0700 -o root -g root "$AI_STAND_SECRETS_DIR"
@@ -1948,232 +2235,11 @@ ensure_docker_secret_from_value() {
     return 0
   fi
 
+  [ "$READ_ONLY_VERIFY" != "1" ] \
+    || die "Read-only verification requires existing Docker secret ${secret_name}"
+
   printf '%s' "$value" | docker_cmd secret create "$secret_name" - >/dev/null
   log "Created Docker secret: ${secret_name}"
-}
-
-# Docker Secret values are intentionally write-only once created.  A few
-# locally generated broker materials are PEM/JSON files rather than one-line
-# values; stream them directly from a root-only host file so they never enter
-# a shell variable, an argv vector, or this script's log.
-ensure_docker_secret_from_file() {
-  local secret_name="$1"
-  local source_file="$2"
-
-  if docker_cmd secret inspect "$secret_name" >/dev/null 2>&1; then
-    log "Docker secret already exists: ${secret_name}"
-    return 0
-  fi
-  run_root test -s "$source_file" \
-    || die "Cannot create Docker secret ${secret_name}: source file is empty or missing"
-  run_root cat "$source_file" | docker_cmd secret create "$secret_name" - >/dev/null
-  log "Created Docker secret: ${secret_name}"
-}
-
-ensure_host_random_secret_file() {
-  local name="$1"
-  local bytes="$2"
-  local path="${AI_STAND_SECRETS_DIR}/${name}"
-
-  run_root install -d -m 0700 -o root -g root "$AI_STAND_SECRETS_DIR"
-  if ! run_root test -s "$path"; then
-    # `openssl rand` never prints the generated value to the terminal: its
-    # stdout is redirected by a root shell directly into the protected file.
-    run_root sh -c 'umask 077; openssl rand -base64 "$1" | tr -d "\\n" > "$2"' sh "$bytes" "$path"
-  fi
-  run_root chown root:root "$path"
-  run_root chmod 0600 "$path"
-  printf '%s\n' "$path"
-}
-
-ensure_gigacode_identity_broker_secrets() {
-  [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ] || return 0
-  # The broker is placed exclusively on ai01.  Do not manufacture a second
-  # signing identity on ai02 merely because someone ran `verify-ai02` there.
-  [ "${NODE_NAME:-}" = "ai01" ] || return 0
-
-  local private_key public_jwks public_pem openwebui_caller openclaw_caller callers
-  private_key="${AI_STAND_SECRETS_DIR}/gigacode-broker-signing-key.pem"
-  public_jwks="${AI_STAND_SECRETS_DIR}/gigacode-broker-public-jwks.json"
-  public_pem="${public_jwks}.pem.tmp"
-  openwebui_caller="${AI_STAND_SECRETS_DIR}/gigacode-broker-openwebui-caller"
-  openclaw_caller="${AI_STAND_SECRETS_DIR}/gigacode-broker-openclaw-caller"
-  callers="${AI_STAND_SECRETS_DIR}/gigacode-broker-callers.json"
-
-  run_root install -d -m 0700 -o root -g root "$AI_STAND_SECRETS_DIR"
-  if ! run_root test -s "$private_key"; then
-    # RSA-3072 is accepted by the .NET JWT stack and keeps the private key
-    # local to ai01. OpenSSL progress is discarded as well.
-    run_root sh -c 'umask 077; openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 > "$1" 2>/dev/null' sh "$private_key"
-  fi
-  if ! run_root test -s "$public_jwks"; then
-    # Agentgateway's `jwtAuth.jwks.file` consumes a JWKS document, not a PEM
-    # public key. Derive the one public RSA key with Python's standard
-    # library; no crypto package, private key value, or output is exposed.
-    run_root sh -c 'umask 077; openssl pkey -in "$1" -pubout > "$2" 2>/dev/null' sh "$private_key" "$public_pem"
-    run_root python3 - "$public_pem" "$public_jwks" <<'PY'
-import base64
-import json
-import os
-import pathlib
-import re
-import sys
-
-def take_tlv(data, offset):
-    if offset >= len(data):
-        raise ValueError("truncated DER")
-    tag = data[offset]
-    offset += 1
-    if offset >= len(data):
-        raise ValueError("truncated DER length")
-    first = data[offset]
-    offset += 1
-    if first < 128:
-        length = first
-    else:
-        count = first & 0x7f
-        if count == 0 or count > 4 or offset + count > len(data):
-            raise ValueError("invalid DER length")
-        length = int.from_bytes(data[offset:offset + count], "big")
-        offset += count
-    end = offset + length
-    if end > len(data):
-        raise ValueError("truncated DER body")
-    return tag, data[offset:end], end
-
-def b64url(value):
-    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
-
-pem = pathlib.Path(sys.argv[1]).read_text(encoding="ascii")
-body = "".join(line for line in pem.splitlines() if not line.startswith("---"))
-der = base64.b64decode(body, validate=True)
-tag, outer, end = take_tlv(der, 0)
-if tag != 0x30 or end != len(der):
-    raise ValueError("invalid public key outer sequence")
-tag, _algorithm, offset = take_tlv(outer, 0)
-if tag != 0x30:
-    raise ValueError("invalid public key algorithm")
-tag, bit_string, end = take_tlv(outer, offset)
-if tag != 0x03 or end != len(outer) or not bit_string or bit_string[0] != 0:
-    raise ValueError("invalid public key bit string")
-tag, rsa, end = take_tlv(bit_string[1:], 0)
-if tag != 0x30 or end != len(bit_string) - 1:
-    raise ValueError("invalid RSA public key")
-tag, modulus, offset = take_tlv(rsa, 0)
-tag2, exponent, end = take_tlv(rsa, offset)
-if tag != 0x02 or tag2 != 0x02 or end != len(rsa):
-    raise ValueError("invalid RSA integers")
-modulus = modulus.lstrip(b"\\0")
-exponent = exponent.lstrip(b"\\0")
-if len(modulus) < 256 or not exponent:
-    raise ValueError("invalid RSA key size")
-document = {"keys": [{"use": "sig", "kty": "RSA", "kid": "ai-stand-gigacode-broker-v1", "alg": "RS256", "n": b64url(modulus), "e": b64url(exponent)}]}
-target = pathlib.Path(sys.argv[2])
-temporary = target.with_suffix(".tmp")
-temporary.write_text(json.dumps(document, separators=(",", ":")), encoding="ascii")
-os.chmod(temporary, 0o600)
-os.replace(temporary, target)
-PY
-    run_root rm -f "$public_pem"
-  fi
-  ensure_host_random_secret_file gigacode-broker-openwebui-caller 32 >/dev/null
-  ensure_host_random_secret_file gigacode-broker-openclaw-caller 32 >/dev/null
-  if ! run_root test -s "$callers"; then
-    # Build the caller allowlist from files, not values.  The JSON carries
-    # only internal broker caller secrets and stays root-only on the host.
-    run_root python3 - "$openwebui_caller" "$openclaw_caller" "$callers" <<'PY'
-import json
-import os
-import pathlib
-import sys
-
-openwebui = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").strip()
-openclaw = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").strip()
-if not openwebui or not openclaw:
-    raise SystemExit("broker caller secret is empty")
-target = pathlib.Path(sys.argv[3])
-temporary = target.with_suffix(".tmp")
-temporary.write_text(json.dumps({"openwebui": openwebui, "openclaw": openclaw}, separators=(",", ":")), encoding="utf-8")
-os.chmod(temporary, 0o600)
-os.replace(temporary, target)
-PY
-  fi
-  run_root chown root:root "$private_key" "$public_jwks" "$openwebui_caller" "$openclaw_caller" "$callers"
-  run_root chmod 0600 "$private_key" "$public_jwks" "$openwebui_caller" "$openclaw_caller" "$callers"
-
-  ensure_docker_secret_from_file ai-stand-gigacode-broker-signing-key "$private_key"
-  ensure_docker_secret_from_file "$GIGACODE_IDENTITY_BROKER_JWKS_SECRET" "$public_jwks"
-  ensure_docker_secret_from_file ai-stand-gigacode-broker-callers "$callers"
-  ensure_docker_secret_from_file ai-stand-gigacode-broker-openwebui-caller "$openwebui_caller"
-  # Created now for the version-pinned OpenClaw adapter.  It is not attached
-  # to any service until that adapter is present and verified.
-  ensure_docker_secret_from_file ai-stand-gigacode-broker-openclaw-caller "$openclaw_caller"
-  local adapter_bearer
-  adapter_bearer="$(ensure_host_random_secret_file gigacode-openclaw-adapter 32)"
-  ensure_docker_secret_from_file ai-stand-openclaw-gigacode-adapter "$adapter_bearer"
-}
-
-# The browser path is bound to Authentik's immutable UUID by trusted proxy
-# and therefore needs no static mapping. Telegram has no OIDC session, so its
-# two explicitly approved sender IDs are bound once to the active akadmin
-# subject. The JSON contains identity routing only -- neither a Device ID nor
-# any API secret -- but remains root-only because changing it would select a
-# different user's subscription.
-ensure_openclaw_gigacode_requester_map() {
-  [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ] || return 0
-  [ "${NODE_NAME:-}" = "ai01" ] || return 0
-
-  local container_id shell_output subject map_path expected_path
-  container_id="$(docker_cmd ps --filter "name=${STACK_NAME}_authentik-server." --format '{{.ID}}' | head -n 1 || true)"
-  [ -n "$container_id" ] || die "Cannot create OpenClaw GigaCode Telegram mapping: Authentik server is not running"
-  shell_output="$(
-    docker_cmd exec -i -e AK_TARGET_USERNAME=akadmin "$container_id" ak shell <<'PYEOF'
-import os
-from authentik.core.models import User
-
-user = User.objects.filter(username=os.environ["AK_TARGET_USERNAME"], is_active=True).first()
-if user is None:
-    print("AI_STAND_GIGACODE_SUBJECT missing")
-else:
-    print("AI_STAND_GIGACODE_SUBJECT " + str(user.uuid))
-PYEOF
-  )" || die "Cannot resolve active akadmin Authentik subject for OpenClaw GigaCode mapping"
-  subject="$(printf '%s\n' "$shell_output" | sed -n 's/^AI_STAND_GIGACODE_SUBJECT //p' | tail -n 1)"
-  printf '%s\n' "$subject" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' \
-    || die "Cannot resolve active akadmin Authentik subject for OpenClaw GigaCode mapping"
-
-  map_path="${AI_STAND_SECRETS_DIR}/gigacode-openclaw-requester-map.json"
-  expected_path="${map_path}.expected"
-  run_root install -d -m 0700 -o root -g root "$AI_STAND_SECRETS_DIR"
-  # Do not let the resolved UUID escape command output. Python receives it
-  # as an argument in a root-only subprocess and writes atomically.
-  run_root python3 - "$subject" "$expected_path" <<'PY'
-import json
-import os
-import pathlib
-import sys
-
-subject = sys.argv[1].lower()
-target = pathlib.Path(sys.argv[2])
-temporary = target.with_suffix(".tmp")
-temporary.write_text(json.dumps({"version": 1, "telegram": {
-    "6990181709": subject,
-    "6135243488": subject,
-}}, separators=(",", ":")), encoding="utf-8")
-os.chmod(temporary, 0o600)
-os.replace(temporary, target)
-PY
-  if run_root test -e "$map_path"; then
-    run_root cmp --silent "$map_path" "$expected_path" \
-      || die "OpenClaw GigaCode Telegram mapping changed; rotate its Docker Secret deliberately before deployment"
-    run_root rm -f "$expected_path"
-  else
-    run_root mv "$expected_path" "$map_path"
-  fi
-  run_root chown root:root "$map_path"
-  run_root chmod 0600 "$map_path"
-  ensure_docker_secret_from_file ai-stand-openclaw-gigacode-requester-map "$map_path"
-  log "OpenClaw GigaCode Telegram requester mapping is ready"
 }
 
 # Generates/loads every ai-stand secret and populates the corresponding
@@ -2191,7 +2257,6 @@ ensure_ai_stand_secrets() {
 
   AUTHENTIK_OPENWEBUI_CLIENT_SECRET="$(load_host_secret authentik-openwebui-client-secret 32)"
   AUTHENTIK_PORTAINER_CLIENT_SECRET="$(load_host_secret authentik-portainer-client-secret 32)"
-  AUTHENTIK_METAMCP_CLIENT_SECRET="$(load_host_secret authentik-metamcp-client-secret 32)"
   AUTHENTIK_AGENTGATEWAY_CLIENT_SECRET="$(load_host_secret authentik-agentgateway-client-secret 32)"
   AUTHENTIK_CODER_CLIENT_SECRET="$(load_host_secret authentik-coder-client-secret 32)"
   ensure_docker_secret_from_value ai-stand-authentik-coder-client-secret "$AUTHENTIK_CODER_CLIENT_SECRET"
@@ -2201,13 +2266,12 @@ ensure_ai_stand_secrets() {
   # OPENCLAW_GATEWAY_TOKEN below.
   AGENTGATEWAY_OPENWEBUI_TOKEN="$(load_host_secret agentgateway-openwebui-token 32)"
   AGENTGATEWAY_OPENCLAW_TOKEN="$(load_host_secret agentgateway-openclaw-token 32)"
-  # Same generate-and-forget pattern as the two above, unconditionally, even
-  # though it's only ever actually handed to a workspace when
-  # CODER_ENABLED=1 (see reconcile_coder_profile_urls()'s TF_VAR_
-  # agentgateway_token, the only consumer) - config.yaml substitutes every
-  # referenced var over the whole file unconditionally, so a Coder-disabled
-  # installation would otherwise crash agentgateway on an unset var rather
-  # than simply not using this one.
+  # Same generate-and-forget pattern as the two above, unconditionally:
+  # config.yaml substitutes every referenced var over the whole file, so a
+  # Coder-disabled installation would otherwise crash agentgateway on an
+  # unset var. No Coder template uses the key at the moment (the earlier
+  # TF_VAR_agentgateway_token hand-off was removed); it stays so a workspace
+  # that needs the model API can be given a service key without a redeploy.
   AGENTGATEWAY_CODER_TOKEN="$(load_host_secret agentgateway-coder-token 32)"
   # Not referenced anywhere in config.yaml - agentgateway looks for this
   # exact env var name directly (undocumented outside its own error text)
@@ -2230,23 +2294,12 @@ ensure_ai_stand_secrets() {
   OPENCLAW_GATEWAY_TOKEN="$(load_host_secret openclaw-gateway-token 32)"
   ensure_docker_secret_from_value ai-stand-openclaw-gateway-token "$OPENCLAW_GATEWAY_TOKEN"
 
-  METAMCP_POSTGRES_PASSWORD="$(load_host_secret metamcp-postgres-password 24 hex)"
-  ensure_docker_secret_from_value ai-stand-metamcp-postgres-password "$METAMCP_POSTGRES_PASSWORD"
-
-  # Backs agentgateway-postgres. hex mode (like metamcp/coder's own Postgres
-  # passwords) matters here specifically: this value is embedded unescaped
+  # Backs agentgateway-postgres. hex mode (like coder's own Postgres
+  # password) matters here specifically: this value is embedded unescaped
   # inside a postgres:// connection URL in agentgateway/config.yaml, so it
   # must never need URL-percent-encoding.
   AGENTGATEWAY_POSTGRES_PASSWORD="$(load_host_secret agentgateway-postgres-password 24 hex)"
   ensure_docker_secret_from_value ai-stand-agentgateway-postgres-password "$AGENTGATEWAY_POSTGRES_PASSWORD"
-  # BETTER_AUTH_SECRET and the bootstrap admin password are pushed as plain
-  # env vars by apply_installation_service_env() (update_service_env), not
-  # via a mounted Docker secret: MetaMCP has no file:// / _FILE indirection
-  # for its own env vars at all (confirmed against docker-entrypoint.sh at
-  # the exact pinned tag, 2026-09-10) - unlike WEBUI_SECRET_KEY/
-  # OPENCLAW_GATEWAY_TOKEN above, which do support it (see compose.yaml).
-  METAMCP_BETTER_AUTH_SECRET="$(load_host_secret metamcp-better-auth-secret 32)"
-  METAMCP_BOOTSTRAP_PASSWORD="$(load_host_secret metamcp-bootstrap-password 24)"
   if [ "$CODER_ENABLED" = "1" ]; then
     CODER_POSTGRES_PASSWORD="$(load_host_secret coder-postgres-password 24 hex)"
     ensure_docker_secret_from_value ai-stand-coder-postgres-password "$CODER_POSTGRES_PASSWORD"
@@ -2254,70 +2307,75 @@ ensure_ai_stand_secrets() {
     # bootstrap_coder_admin()'s `docker exec`. Retrievable via `credentials`.
     CODER_ADMIN_PASSWORD="$(load_host_secret coder-admin-password 24)"
   fi
-  ensure_gigacode_identity_broker_secrets
+  if [ "${GITEA_ENABLED:-0}" = "1" ]; then
+    GITEA_POSTGRES_PASSWORD="$(load_host_secret gitea-postgres-password 24 hex)"
+    AUTHENTIK_GITEA_CLIENT_SECRET="$(load_host_secret authentik-gitea-client-secret 32)"
+    ensure_docker_secret_from_value ai-stand-gitea-postgres-password "$GITEA_POSTGRES_PASSWORD"
+    ensure_docker_secret_from_value ai-stand-authentik-gitea-client-secret "$AUTHENTIK_GITEA_CLIENT_SECRET"
+  fi
+  ensure_controller_secrets
+}
+
+ensure_controller_secrets() {
+  [ "${CONTROLLER_ENABLED:-0}" = "1" ] || return 0
+  # A Swarm-wide Docker secret: it is created from, and its value kept on, the node that deploys the controller.
+  [ "$NODE_NAME" = "ai01" ] || return 0
+  # Authenticates the controller to the cert-receiver on the other node.
+  CERTBOT_RECEIVER_TOKEN="$(load_host_secret certbot-receiver-token 32)"
+  ensure_docker_secret_from_value ai-stand-certbot-receiver-token "$CERTBOT_RECEIVER_TOKEN"
 }
 
 cmd_credentials() {
-  load_os_info
-  ensure_ai_stand_secrets
-  cat <<CREDS
-Authentik   : https://${AUTHENTIK_HOST}
-  username  : ${AUTHENTIK_BOOTSTRAP_USERNAME}
-  password  : ${AUTHENTIK_BOOTSTRAP_PASSWORD}
-  api token : ${AUTHENTIK_BOOTSTRAP_TOKEN}
-Portainer   : https://${PORTAINER_HOST}
-  username  : ${PORTAINER_ADMIN_USERNAME}
-  password  : ${PORTAINER_ADMIN_PASSWORD}
-MetaMCP     : https://${METAMCP_HOST}
-  email     : ${METAMCP_BOOTSTRAP_EMAIL}
-  password  : ${METAMCP_BOOTSTRAP_PASSWORD}
-  (log in, then create a namespace + endpoint + API key for OpenClaw/opencode to use)
-OpenClaw gateway token: ${OPENCLAW_GATEWAY_TOKEN}
-
-agentgateway (https://${AGENTGATEWAY_HOST}) machine tokens:
-  openwebui : ${AGENTGATEWAY_OPENWEBUI_TOKEN}  (wired in automatically, shown for debugging only)
-  openclaw  : ${AGENTGATEWAY_OPENCLAW_TOKEN}   (wired in automatically, shown for debugging only)
-  coder     : ${AGENTGATEWAY_CODER_TOKEN}      (wired in automatically, shown for debugging only)
-
-These are generated once per installation and persisted under
-${AI_STAND_SECRETS_DIR} (root-only, mode 0600).
-
-Rotation is NOT as simple as "delete the file and redeploy" for most of the
-values above (confirmed 2026-09-13 by tracing every consumer):
-- Docker secrets are immutable by design and ensure_docker_secret_from_value()
-  only ever creates, never replaces one - deleting the host file just makes
-  this script generate a new value for its own in-memory use, while the
-  actual mounted secret (what the container reads) silently keeps the old
-  one. This affects the Authentik bootstrap password/token, Portainer admin
-  password, MetaMCP's bootstrap password, and the OpenClaw gateway
-  token: after a "rotation" this command would print new values that don't
-  actually work anywhere.
-- WORSE: never delete the metamcp-postgres-password file this way. Its
-  value is pushed to the app service live via update_service_env on every
-  apply.sh run, but the database role's actual password is only ever set
-  once, at initdb, from that same never-updated Docker secret - "rotating"
-  this file breaks MetaMCP's DB connection immediately on next deploy, with
-  no automatic recovery.
-- What DOES rotate safely this way: the 4 Authentik OIDC client secrets
-  (openwebui/portainer/metamcp/agentgateway) and the 2 agentgateway
-  machine tokens above - cmd_configure_authentik()/apply_installation_service_env()
-  actively PATCH/push these live on every run, not just create-once.
-
-A real fix for the others needs an explicit secret-replace (docker secret rm
-+ recreate, redeploy to remount) done together with updating whatever
-downstream state depends on the old value (e.g. ALTER USER for the Postgres
-passwords) - not implemented yet, do this by hand with care if ever needed.
-CREDS
+  local -a names=(
+    authentik-secret-key authentik-postgres-password authentik-bootstrap-token authentik-bootstrap-password
+    authentik-openwebui-client-secret authentik-portainer-client-secret
+    authentik-agentgateway-client-secret authentik-coder-client-secret authentik-gitea-client-secret
+    readonly-mcp-authentik-api-token gitea-ssh-sync-authentik-api-token gitea-ssh-sync-gitea-token
+    coder-admin-password coder-postgres-password
+    portainer-admin-password openwebui-secret-key openclaw-gateway-token agentgateway-openwebui-token
+    agentgateway-openclaw-token agentgateway-coder-token agentgateway-oidc-cookie-secret
+    agentgateway-postgres-password
+    gitea-postgres-password
+    certbot-receiver-token
+    ssh-key-delivery-authentik-api-token ssh-key-delivery-token
+  )
+  local name path metadata found
+  [ "$(id -u)" -eq 0 ] || die "credentials command must run as root"
+  case "$CREDENTIALS_ACTION" in
+    list)
+      for name in "${names[@]}"; do
+        path="${AI_STAND_SECRETS_DIR}/${name}"
+        if run_root test -e "$path"; then
+          metadata="$(run_root stat -c '%F|%u|%g|%a|%h' -- "$path")"
+          [ "$metadata" = "regular file|0|0|600|1" ] || die "Unsafe credential file metadata: ${name}"
+          log "available: ${name}"
+        else
+          log "missing: ${name}"
+        fi
+      done
+      ;;
+    show)
+      [[ "$CREDENTIALS_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || die "Invalid credential name"
+      found="0"
+      for name in "${names[@]}"; do [ "$name" = "$CREDENTIALS_NAME" ] && found="1"; done
+      [ "$found" = "1" ] || die "Credential name is not in the supported script-generated allowlist"
+      path="${AI_STAND_SECRETS_DIR}/${CREDENTIALS_NAME}"
+      metadata="$(run_root stat -c '%F|%u|%g|%a|%h' -- "$path")" || die "Credential is missing"
+      [ "$metadata" = "regular file|0|0|600|1" ] || die "Unsafe credential file metadata"
+      run_root cat -- "$path"
+      ;;
+    *) die "credentials action must be list or show" ;;
+  esac
 }
 
 ensure_storage() {
-  run_root install -d -m 0755 /mnt/storage
+  run_root install -d -m 0755 "$STORAGE_ROOT"
   run_root install -d -m 0750 -o root -g root "$BACKUP_ROOT"
 
   case "$NODE_NAME" in
     ai01)
       # Kept outside agentgateway-data: neither the gateway container nor
-      # its service account may read the reconciler's AppRole/API-token file
+      # its service account may read the reconciler's API-token file
       # paths, generated manifest, or timer state.
       run_root install -d -m 0700 -o root -g root "$READONLY_MCP_DATA_ROOT"
       run_root install -d -m 0700 -o root -g root "$READONLY_MCP_RECONCILER_DATA"
@@ -2326,15 +2384,11 @@ ensure_storage() {
       # its deliberate absence retains the generic /mcp/work value.
       run_root install -d -m 0700 -o root -g root "$AI_STAND_DATA_ROOT"
       run_root install -d -m 0700 -o root -g root "$INSTALLATION_OVERRIDES_ROOT"
-      migrate_root_data_to_component "$LMSTUDIO_DATA_ROOT" "$LMSTUDIO_DATA" 0750
+      run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$LLAMACPP_DATA_ROOT"
+      run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$LLAMACPP01_DATA"
+      run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "${LLAMACPP01_DATA}/models" "${LLAMACPP01_DATA}/state"
       migrate_root_data_to_component "$OPENWEBUI_DATA_ROOT" "$OPENWEBUI_DATA" 0750
       migrate_root_data_to_component "$PORTAINER_DATA_ROOT" "$PORTAINER_DATA" 0750
-      # MetaMCP moved here from the second node; a fresh, empty datastore is
-      # intentional (see the "Судьба MetaMCP" note in the agentgateway
-      # plan: 0 registered MCP servers, only a bootstrap admin account, so
-      # a clean restart on the new node was accepted over migrating
-      # /mnt/storage/metamcp-data from the previous node by hand).
-      migrate_root_data_to_component "$METAMCP_DATA_ROOT" "$METAMCP_DATA" 0750
       # Same service:storage/0750 convention as every other component
       # above - the vendor image's own default UID (65532, confirmed live)
       # is deliberately overridden to APP_UID:APP_GID via compose.yaml's
@@ -2359,39 +2413,104 @@ ensure_storage() {
         run_root mv "${AGENTGATEWAY_DATA_ROOT}/config" "$AGENTGATEWAY_DATA"
         log "Renamed ${AGENTGATEWAY_DATA_ROOT}/config to ${AGENTGATEWAY_DATA}"
       fi
-      migrate_root_data_to_component "$AGENTGATEWAY_DATA_ROOT" "$AGENTGATEWAY_DATA" 0750
+      # Agentgateway PostgreSQL has its own sibling role below the same
+      # component root.  It predates the `server/` layout and intentionally
+      # has no generic ownership marker, so preserve it while detecting any
+      # truly flat legacy Gateway data that still needs migration.
+      migrate_root_data_to_component "$AGENTGATEWAY_DATA_ROOT" "$AGENTGATEWAY_DATA" 0750 "postgres"
       run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$AGENTGATEWAY_POSTGRES_DATA"
       ensure_authentik_data
       ensure_portainer_data
+      if [ "${GITEA_ENABLED:-0}" = "1" ]; then
+        run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$GITEA_DATA_ROOT"
+        run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$GITEA_SERVER_DATA"
+        run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$GITEA_CONFIG_DATA"
+        run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$GITEA_POSTGRES_DATA"
+        run_root install -d -m 0700 -o "$APP_UID" -g "$APP_GID" "$GITEA_BACKUPS_DATA"
+      fi
       ;;
     ai02)
+      run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$LLAMACPP_DATA_ROOT"
+      run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$LLAMACPP02_DATA"
+      run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "${LLAMACPP02_DATA}/models" "${LLAMACPP02_DATA}/state"
       # Manual OpenClaw configuration backups intentionally remain directly
       # below the component root. They are protected operator recovery
       # artifacts, not legacy root-style service data to migrate or delete.
       mark_existing_openclaw_component_owned "$OPENCLAW_DATA" "Gateway"
-      mark_existing_openclaw_component_owned "$OPENCLAW_SANDBOX_DATA" "sandbox DIND"
-      migrate_root_data_to_component "$OPENCLAW_DATA_ROOT" "$OPENCLAW_DATA" 0750 "openclaw.json.manual-backup-*"
-      migrate_root_data_to_component "$OPENCLAW_DATA_ROOT" "$OPENCLAW_SANDBOX_DATA" 0750 "openclaw.json.manual-backup-*"
-      ensure_openclaw_sandbox_workspace_root
-      ensure_openclaw_gigacode_requester_state
+      ensure_openclaw_docker_sandbox_storage
+      migrate_root_data_to_component "$OPENCLAW_DATA_ROOT" "$OPENCLAW_DATA" 0750 \
+        "openclaw.json.manual-backup-*" "sandboxes"
       if [ "$CODER_ENABLED" = "1" ]; then
         run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$CODER_DATA_ROOT"
         run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$CODER_SERVER_DATA"
         run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$CODER_POSTGRES_DATA"
-        run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$CODER_PROVISIONER_DATA"
-        run_root install -d -m 0700 -o "$APP_UID" -g "$APP_GID" "$CODER_PROVISIONER_HOME"
-        run_root install -d -m 0700 -o "$APP_UID" -g "$APP_GID" "$CODER_PROVISIONER_RUNTIME"
-        run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$CODER_PROVISIONER_DOCKER_DATA"
       fi
+      # The workspace identity owns the key directories, so the receiver (which runs as that identity) writes keys it can
+      # leave at 0400. Docker refuses a bind mount whose source is missing, and the Gateway mounts services/openclaw
+      # whatever the delivery state, so the service tree exists unconditionally.
+      run_root install -d -m 0700 -o "$APP_UID" -g "$APP_GID" \
+        "$SSH_KEY_DELIVERY_DATA_ROOT" "$SSH_SERVICE_KEYS_ROOT" "${SSH_SERVICE_KEYS_ROOT}/openclaw"
+      if [ "${SSH_KEY_DELIVERY_ENABLED:-0}" = "1" ]; then
+        run_root install -d -m 0700 -o "$APP_UID" -g "$APP_GID" "$SSH_KEYS_ROOT"
+      fi
+      install_openclaw_telegram_token
       ;;
     *)
       die "Unknown node name: ${NODE_NAME:-empty}"
       ;;
   esac
-  ensure_legacy_storage_maintenance_preserves_overrides
+  check_legacy_storage_maintenance_safety
   ensure_host_secret_storage_protection
   harden_readonly_mcp_reconciler_control_files
   ensure_installation_override_protection
+}
+
+# The Telegram bot token is the one Telegram setting Authentik does not hold (init.mjs reads the groups and people from
+# there). The owner puts it, as a bare token, into ${AI_STAND_SECRETS_DIR}/openclaw-telegram-bot-token on this node
+# (root, 0600); it is copied to the Gateway's state directory, where init.mjs points channels.telegram.tokenFile at it.
+# Without the file nothing happens here and the channel is configured only once there is a token. The value is never
+# printed or put on a command line.
+install_openclaw_telegram_token() {
+  local source="${AI_STAND_SECRETS_DIR}/openclaw-telegram-bot-token"
+  local target_dir="${OPENCLAW_DATA}/.openclaw"
+  if ! run_root test -f "$source"; then
+    log "No ${source}: the OpenClaw Telegram channel stays off until it exists"
+    return 0
+  fi
+  run_root install -d -m 0700 -o "$APP_UID" -g "$APP_GID" "$target_dir"
+  local outcome
+  outcome="$(run_root python3 - "$source" "${target_dir}/telegram-bot-token" "$APP_UID" "$APP_GID" <<'PY'
+import os
+import re
+import sys
+
+source, target, uid, gid = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+token = open(source, encoding="utf-8").read().strip()
+if not re.fullmatch(r"[0-9]{6,12}:[A-Za-z0-9_-]{30,64}", token):
+    print("invalid")
+    sys.exit(1)
+try:
+    current = open(target, encoding="utf-8").read()
+except OSError:
+    current = None
+if current == token:
+    os.chown(target, uid, gid)
+    os.chmod(target, 0o600)
+    print("unchanged")
+    sys.exit(0)
+temporary = target + ".new"
+descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+    handle.write(token)
+os.chown(temporary, uid, gid)
+os.replace(temporary, target)
+print("installed")
+PY
+)" || die "${source} must hold exactly one Telegram bot token (<digits>:<30 to 64 characters>)"
+  case "$outcome" in
+    installed) log "Installed the OpenClaw Telegram bot token for the Gateway; it is read at the next Gateway start" ;;
+    *) log "OpenClaw Telegram bot token already installed" ;;
+  esac
 }
 
 ensure_host_secret_storage_protection() {
@@ -2422,9 +2541,7 @@ harden_readonly_mcp_reconciler_control_files() {
   local path
   for path in \
     "$READONLY_MCP_RECONCILER_CONFIG" \
-    "$READONLY_MCP_MANIFEST" \
-    "$METAMCP_TENANT_IDENTITY_INVENTORY" \
-    "$METAMCP_TENANT_MANIFEST"; do
+    "$READONLY_MCP_MANIFEST"; do
     [ -e "$path" ] || continue
     [ -f "$path" ] || die "Read-only MCP control-plane path must be a regular file: $path"
     run_root chown root:root "$path"
@@ -2445,137 +2562,23 @@ ensure_installation_override_protection() {
   run_root chmod 0600 "$READONLY_MCP_RUNTIME_OVERRIDE_FILE"
 }
 
-ensure_legacy_storage_maintenance_preserves_overrides() {
-  [ "$NODE_NAME" = "ai01" ] || return 0
-  # m01 had a pre-existing /mnt/fix.sh that recursively changes every
-  # *-data tree to service:storage/0750. Keep its established behavior for
-  # all ordinary component data, but append small, recognizable repair
-  # blocks for root-only host secrets and the installation-control
-  # directory. Refuse to modify an unrecognized maintenance script rather
-  # than guessing at a third-party administrator's intent.
+check_legacy_storage_maintenance_safety() {
+  # /mnt/fix.sh belongs to the operator and is never edited by ai-stand.
+  # Broad recursive chown/chmod rules can silently expose root-only secrets
+  # or break application-owned data.  Refuse a rollout until the operator
+  # has replaced legacy wildcard rules with a narrow, reviewed policy.
   local maintenance="/mnt/fix.sh"
   [ -f "$maintenance" ] || return 0
-  run_root grep -Fqx 'sudo chown -R service:storage /mnt/storage/*-data' "$maintenance" \
-    || die "Refusing to alter unrecognized legacy storage maintenance: $maintenance"
-  run_root grep -Fqx 'sudo chmod -R 750             /mnt/storage/*-data' "$maintenance" \
-    || die "Refusing to alter unrecognized legacy storage maintenance: $maintenance"
 
-  local replacement changed=0
-  replacement="$(mktemp)"
-  run_root cat "$maintenance" > "$replacement"
-  if ! run_root grep -Fqx '# ai-stand: preserve root-only installation overrides' "$maintenance"; then
-    cat >> "$replacement" <<EOF
-
-# ai-stand: preserve root-only installation overrides
-sudo install -d -m 0700 -o root -g root ${INSTALLATION_OVERRIDES_ROOT}
-if [ -f ${READONLY_MCP_RUNTIME_OVERRIDE_FILE} ]; then
-  sudo chown root:root ${READONLY_MCP_RUNTIME_OVERRIDE_FILE}
-  sudo chmod 0600 ${READONLY_MCP_RUNTIME_OVERRIDE_FILE}
-fi
-EOF
-    changed=1
-  fi
-  if ! run_root grep -Fqx '# ai-stand: preserve root-only host secrets' "$maintenance"; then
-    cat >> "$replacement" <<EOF
-
-# ai-stand: preserve root-only host secrets
-sudo install -d -m 0700 -o root -g root ${AI_STAND_SECRETS_DIR}
-sudo find ${AI_STAND_SECRETS_DIR} -xdev -maxdepth 1 -type f -exec chown root:root {} +
-sudo find ${AI_STAND_SECRETS_DIR} -xdev -maxdepth 1 -type f -exec chmod 0600 {} +
-EOF
-    changed=1
-  fi
-  if ! run_root grep -Fqx '# ai-stand: preserve read-only MCP control-plane state' "$maintenance"; then
-    cat >> "$replacement" <<EOF
-
-# ai-stand: preserve read-only MCP control-plane state
-sudo install -d -m 0700 -o root -g root ${READONLY_MCP_DATA_ROOT}
-sudo install -d -m 0700 -o root -g root ${READONLY_MCP_RECONCILER_DATA}
-sudo find ${READONLY_MCP_RECONCILER_DATA} -xdev -maxdepth 1 -type f -exec chown root:root {} +
-sudo find ${READONLY_MCP_RECONCILER_DATA} -xdev -maxdepth 1 -type f -exec chmod 0600 {} +
-EOF
-    changed=1
-  fi
-  if [ "$changed" = "1" ]; then
-    run_root install -m 0750 -o root -g root "$replacement" "$maintenance"
-    log "Updated legacy storage maintenance to preserve installation controls"
-  fi
-  rm -f "$replacement"
-}
-
-install_readonly_mcp_reconciler() {
-  [ "$NODE_NAME" = "ai01" ] || return 0
-  local unit="ai-stand-readonly-mcp-reconciler"
-  if [ "$READONLY_MCP_ENABLED" != "1" ]; then
-    # A profile may ship the capability without enabling it. Stop a legacy
-    # timer if an operator deliberately disables the feature, but retain its
-    # root-only state and Docker Secrets for explicit recovery/rotation.
-    run_root systemctl disable --now "${unit}.timer" >/dev/null 2>&1 || true
-    return 0
+  # The storage root with its dots made literal for the extended regular expression.
+  local root_re="${STORAGE_ROOT//./[.]}"
+  if run_root grep -Eq \
+    "(^|[[:space:];])((sudo[[:space:]]+)?(chown|chmod)[[:space:]]+-R[^[:cntrl:]]*${root_re}/(_secrets|ai-stand-data)|${root_re}/\*|\*-data)" \
+    "$maintenance"; then
+    die "Unsafe recursive ownership/permission rule in ${maintenance}; ai-stand will not modify it. Exclude ${STORAGE_ROOT}/_secrets and root-only overrides, then rerun preflight."
   fi
 
-  require_readonly_mcp_sources
-  local libexec_dir="/usr/local/libexec/ai-stand"
-  local wrapper_tmp service_tmp timer_tmp
-  wrapper_tmp="$(mktemp)"
-  service_tmp="$(mktemp)"
-  timer_tmp="$(mktemp)"
-  cat > "$wrapper_tmp" <<WRAPPER
-#!/usr/bin/env bash
-set -euo pipefail
-exec /usr/bin/python3 ${libexec_dir}/readonly-mcp-reconcile.py \\
-  --config ${READONLY_MCP_RECONCILER_CONFIG} \\
-  --manifest ${READONLY_MCP_MANIFEST} \\
-  --apply-script ${SCRIPT_DIR}/apply.sh \\
-  --installation ${INSTALLATION} \\
-  --node ai01
-WRAPPER
-  cat > "$service_tmp" <<SERVICE
-[Unit]
-Description=Reconcile Authentik-attribute-backed ai-stand read-only MCP services
-After=docker.service network-online.target
-Wants=docker.service network-online.target
-ConditionPathExists=${READONLY_MCP_RECONCILER_CONFIG}
-
-[Service]
-Type=oneshot
-User=root
-Group=root
-ExecStart=${libexec_dir}/readonly-mcp-reconcile
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ReadWritePaths=${READONLY_MCP_DATA_ROOT} /run/lock
-UMask=0077
-SERVICE
-  cat > "$timer_tmp" <<TIMER
-[Unit]
-Description=Run ai-stand read-only MCP reconciliation every five minutes
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-RandomizedDelaySec=30s
-Persistent=true
-Unit=${unit}.service
-
-[Install]
-WantedBy=timers.target
-TIMER
-  run_root install -d -m 0750 -o root -g root "$libexec_dir"
-  install_if_changed "$READONLY_MCP_RECONCILER" "${libexec_dir}/readonly-mcp-reconcile.py" 0750 root root
-  run_root install -d -m 0750 -o root -g root "${libexec_dir}/metamcp-tenants"
-  install_if_changed "${METAMCP_TENANT_CONTROL_SOURCE_DIR}/provision.py" "${libexec_dir}/metamcp-tenants/provision.py" 0750 root root
-  install_if_changed "${METAMCP_TENANT_CONTROL_SOURCE_DIR}/tenant_manifest.py" "${libexec_dir}/metamcp-tenants/tenant_manifest.py" 0640 root root
-  install_if_changed "${METAMCP_TENANT_CONTROL_SOURCE_DIR}/tenant_runtime.py" "${libexec_dir}/metamcp-tenants/tenant_runtime.py" 0640 root root
-  install_if_changed "${METAMCP_TENANT_CONTROL_SOURCE_DIR}/legacy_inventory_adapter.py" "${libexec_dir}/metamcp-tenants/legacy_inventory_adapter.py" 0750 root root
-  install_if_changed "$wrapper_tmp" "${libexec_dir}/readonly-mcp-reconcile" 0750 root root
-  install_if_changed "$service_tmp" "/etc/systemd/system/${unit}.service" 0644 root root
-  install_if_changed "$timer_tmp" "/etc/systemd/system/${unit}.timer" 0644 root root
-  rm -f "$wrapper_tmp" "$service_tmp" "$timer_tmp"
-  run_root systemctl daemon-reload
-  run_root systemctl enable --now "${unit}.timer" >/dev/null
-  log "Read-only MCP reconciler timer installed (five-minute interval)"
+  log "Operator-owned ${maintenance} passed narrow recursive-permissions safety check"
 }
 
 has_firewalld_zone() {
@@ -2667,6 +2670,17 @@ remove_zone_port_if_present() {
   fi
 }
 
+ensure_zone_port() {
+  local zone="$1"
+  local port="$2"
+  if run_root firewall-cmd --permanent --zone="$zone" --query-port="${port}/tcp" >/dev/null; then
+    log "firewalld port ${port}/tcp already allowed in ${zone}"
+  else
+    run_root firewall-cmd --permanent --zone="$zone" --add-port="${port}/tcp" >/dev/null
+    log "Allowed firewalld port ${port}/tcp in ${zone}"
+  fi
+}
+
 ensure_rich_rule() {
   local zone="$1"
   local rule="$2"
@@ -2690,7 +2704,7 @@ remove_rich_rule_if_present() {
 configure_firewalld() {
   run_root systemctl enable --now firewalld >/dev/null
   ensure_firewalld_zone ai-stand
-  local trusted_cidr
+  local trusted_cidr port
   for trusted_cidr in "${TRUSTED_CIDRS[@]}"; do
     ensure_zone_source ai-stand "$trusted_cidr"
   done
@@ -2703,9 +2717,14 @@ configure_firewalld() {
   ensure_zone_service ai-stand ssh
   ensure_zone_service ai-stand http
   ensure_zone_service ai-stand https
+  for port in "${PUBLIC_PORTS[@]}"; do
+    case "$port" in
+      80|443) ;;
+      *) ensure_zone_port ai-stand "$port" ;;
+    esac
+  done
 
   local zone
-  local port
   # firewall-cmd prints zone names space-separated on one line, not one per
   # line, so this needs an explicit split (`read -ra`) rather than a plain
   # `for zone in $(...)`, which is also subject to pathname expansion on
@@ -2746,6 +2765,17 @@ configure_firewalld() {
     while IFS= read -r port; do
       ensure_rich_rule "$zone" "rule family=\"ipv4\" port port=\"${port}\" protocol=\"tcp\" drop"
     done < <(technical_ports_for_current_node)
+
+    # Drop rules only ever accumulated: the ports of retired services (1234,
+    # 7080, 11234, 12008, ...) stayed forever. Remove every drop rule of exactly
+    # the shape written above whose port is no longer a technical port here.
+    local live_rule live_port
+    while IFS= read -r live_rule; do
+      live_port="${live_rule#rule family=\"ipv4\" port port=\"}"
+      live_port="${live_port%%\"*}"
+      technical_ports_for_current_node | grep -qx "$live_port" && continue
+      remove_rich_rule_if_present "$zone" "$live_rule"
+    done < <(run_root firewall-cmd --permanent --zone="$zone" --list-rich-rules | grep -E '^rule family="ipv4" port port="[0-9]+" protocol="tcp" drop$' || true)
 
     for port in "${PUBLIC_PORTS[@]}"; do
       for trusted_cidr in "${TRUSTED_CIDRS[@]}"; do
@@ -2797,7 +2827,7 @@ set -euo pipefail
 CHAIN="AI-STAND-PROTECT"
 HOST_CHAIN="AI-STAND-HOST-PROTECT"
 PORTS=(__AI_STAND_TECH_PORTS__)
-PUBLIC_PORTS=(80 443)
+PUBLIC_PORTS=(__AI_STAND_PUBLIC_PORTS__)
 PEER_IP=""
 PEER_ALLOWED_PORTS=""
 TRUSTED_CIDRS=""
@@ -2881,7 +2911,10 @@ apply_rules iptables
 apply_rules ip6tables
 HELPER
 
+  local public_ports
+  public_ports="$(printf '%s ' "${PUBLIC_PORTS[@]}" | sed 's/[[:space:]]*$//')"
   sed -i "s/__AI_STAND_TECH_PORTS__/${technical_ports}/" "$helper_tmp"
+  sed -i "s/__AI_STAND_PUBLIC_PORTS__/${public_ports}/" "$helper_tmp"
 
   cat > "$service_tmp" <<'SERVICE'
 [Unit]
@@ -2909,176 +2942,23 @@ SERVICE
   log "DOCKER-USER protection applied"
 }
 
-# openclaw-sandbox-dind cannot be a Swarm service: Swarm's task API has
-# never had a Privileged field (moby/moby#24862, still open), so
-# `docker stack deploy` silently drops `privileged: true` and the dind
-# daemon fails every mount/cgroup setup it needs (confirmed live 2026-09-07 -
-# HostConfig.Privileged came back false despite the compose file). Instead
-# this runs as a plain host-level `docker run` container managed by its own
-# systemd unit, matching how install_docker_user_helper/install_nginx above
-# already manage host-level pieces outside the stack. It attaches to the
-# Swarm-created ai-openclaw-sandbox network as an external, non-stack member
-# (that network is attachable:true for exactly this) with the same
-# `openclaw-sandbox-dind` alias openclaw-gateway's DOCKER_HOST expects. The
-# network only exists once `deploy` has run at least once, so on a fresh
-# install the first start(s) fail until then - Restart=on-failure below
-# retries until it succeeds, the same self-healing behavior a Swarm
-# restart_policy would have given it.
-ensure_openclaw_sandbox_dind_service() {
-  local network_name="${STACK_NAME}_ai-openclaw-sandbox"
-  local service_tmp
-  service_tmp="$(mktemp)"
-
-  cat > "$service_tmp" <<UNIT
-[Unit]
-Description=OpenClaw sandbox Docker-in-Docker daemon (host-level: Swarm services cannot get privileged mode)
-After=docker.service
-Wants=docker.service
-
-[Service]
-Type=simple
-ExecStartPre=-/usr/bin/docker rm -f ai-stand-openclaw-sandbox-dind
-ExecStart=/usr/bin/docker run --rm --name ai-stand-openclaw-sandbox-dind --privileged -e DOCKER_TLS_CERTDIR= --network ${network_name} --network-alias openclaw-sandbox-dind -v ${OPENCLAW_SANDBOX_DATA}:/var/lib/docker -v ${OPENCLAW_SANDBOX_WORKSPACE_ROOT}:/home/ai/.openclaw/sandboxes:rw ${OPENCLAW_SANDBOX_DIND_IMAGE}
-ExecStop=/usr/bin/docker stop -t 30 ai-stand-openclaw-sandbox-dind
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-  install_if_changed "$service_tmp" /etc/systemd/system/ai-stand-openclaw-sandbox-dind.service 0644 root root
-  rm -f "$service_tmp"
-
-  run_root systemctl daemon-reload
-  run_root systemctl enable ai-stand-openclaw-sandbox-dind.service >/dev/null
-  run_root systemctl restart ai-stand-openclaw-sandbox-dind.service
-  log "OpenClaw sandbox dind host service applied"
-}
-
-# Coder's built-in provisioner (the Community edition path) needs a Docker
-# endpoint, but must never receive this host's /var/run/docker.sock or the
-# privileged OpenClaw DIND daemon.  A distinct rootless dockerd runs as the
-# same numeric service user as the Coder container.  Its state and socket are
-# confined below coder-data/provisioner, and its only explicit workspace
-# network is ai-coder-workspaces.
-ensure_coder_rootless_docker_service() {
+ensure_coder_workspace_images() {
   [ "$CODER_ENABLED" = "1" ] || return 0
   [ "$NODE_NAME" = "ai02" ] || return 0
 
-  local runtime_uid
-  runtime_uid="$(id -u "$CODER_RUNTIME_USER" 2>/dev/null || true)"
-  [ "$runtime_uid" = "$APP_UID" ] \
-    || die "Coder runtime user ${CODER_RUNTIME_USER} must have UID ${APP_UID}"
-  getent group "$APP_GID" >/dev/null \
-    || die "Coder app GID ${APP_GID} does not exist"
-  grep -qE "^${CODER_RUNTIME_USER}:[0-9]+:[0-9]+$" /etc/subuid \
-    || die "Coder runtime user ${CODER_RUNTIME_USER} has no subordinate UID range"
-  grep -qE "^${CODER_RUNTIME_USER}:[0-9]+:[0-9]+$" /etc/subgid \
-    || die "Coder runtime user ${CODER_RUNTIME_USER} has no subordinate GID range"
-
-  # docker-ce-rootless-extras supplies dockerd-rootless.sh/rootlesskit;
-  # slirp4netns supplies the unprivileged network backend.  These packages
-  # do not alter the system Docker daemon or its socket.
-  if ! command_exists dockerd-rootless.sh || ! command_exists rootlesskit; then
-    run_root apt-get update
-    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y docker-ce-rootless-extras
-  fi
-  if ! command_exists slirp4netns || ! command_exists newuidmap || ! command_exists newgidmap; then
-    run_root apt-get update
-    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y slirp4netns fuse-overlayfs uidmap
-  fi
-
-  command_exists dockerd-rootless.sh || die "dockerd-rootless.sh is unavailable after installing Coder prerequisites"
-  command_exists rootlesskit || die "rootlesskit is unavailable after installing Coder prerequisites"
-  command_exists slirp4netns || die "slirp4netns is unavailable after installing Coder prerequisites"
-
-  local service_tmp
-  service_tmp="$(mktemp)"
-  cat > "$service_tmp" <<UNIT
-[Unit]
-Description=ai-stand Coder dedicated rootless Docker daemon
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=${CODER_RUNTIME_USER}
-Environment=HOME=${CODER_PROVISIONER_HOME}
-Environment=XDG_RUNTIME_DIR=${CODER_PROVISIONER_RUNTIME}
-Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns
-Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=slirp4netns
-Environment=DOCKER_HOST=unix://${CODER_ROOTLESS_DOCKER_SOCKET}
-ExecStartPre=/usr/bin/rm -f ${CODER_ROOTLESS_DOCKER_SOCKET}
-ExecStart=/usr/bin/dockerd-rootless.sh --host=unix://${CODER_ROOTLESS_DOCKER_SOCKET} --data-root=${CODER_PROVISIONER_DOCKER_DATA}
-Restart=on-failure
-RestartSec=10
-PrivateTmp=yes
-Delegate=yes
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-  install_if_changed "$service_tmp" /etc/systemd/system/ai-stand-coder-rootless-docker.service 0644 root root
-  rm -f "$service_tmp"
-  run_root systemctl daemon-reload
-  run_root systemctl enable --now ai-stand-coder-rootless-docker.service >/dev/null
-
-  local deadline=$(( $(date +%s) + 120 ))
-  until run_root sudo -u "$CODER_RUNTIME_USER" env \
-    HOME="$CODER_PROVISIONER_HOME" \
-    XDG_RUNTIME_DIR="$CODER_PROVISIONER_RUNTIME" \
-    DOCKER_HOST="unix://${CODER_ROOTLESS_DOCKER_SOCKET}" \
-    docker info >/dev/null 2>&1; do
-    [ "$(date +%s)" -lt "$deadline" ] \
-      || die "Coder rootless Docker daemon did not become ready within 120 seconds"
-    sleep 2
+  # Coder reaches the host Docker daemon only through its dedicated socket
+  # proxy. Build these trusted administrator-owned images on ai02 before
+  # publishing templates; neither image receives a socket at runtime.
+  local image source
+  for image in "$CODER_CSHARP_WORKSPACE_IMAGE" "$CODER_PYTHON_WORKSPACE_IMAGE"; do
+    case "$image" in
+      *csharp*) source="${SCRIPT_DIR}/docker/coder-workspace-csharp/Dockerfile" ;;
+      *python*) source="${SCRIPT_DIR}/docker/coder-workspace-python/Dockerfile" ;;
+      *) die "Unexpected Coder workspace image: $image" ;;
+    esac
+    docker_cmd build --pull --tag "$image" -f "$source" "$(dirname "$source")"
   done
-
-  run_root sudo -u "$CODER_RUNTIME_USER" env \
-    HOME="$CODER_PROVISIONER_HOME" \
-    XDG_RUNTIME_DIR="$CODER_PROVISIONER_RUNTIME" \
-    DOCKER_HOST="unix://${CODER_ROOTLESS_DOCKER_SOCKET}" \
-    docker network inspect "$CODER_WORKSPACE_NETWORK" >/dev/null 2>&1 \
-    || run_root sudo -u "$CODER_RUNTIME_USER" env \
-      HOME="$CODER_PROVISIONER_HOME" \
-      XDG_RUNTIME_DIR="$CODER_PROVISIONER_RUNTIME" \
-      DOCKER_HOST="unix://${CODER_ROOTLESS_DOCKER_SOCKET}" \
-      docker network create "$CODER_WORKSPACE_NETWORK" >/dev/null
-  log "Coder dedicated rootless Docker daemon is ready"
-}
-
-# ai-stand-coder-workspace is the image docker_container.workspace in
-# docker/coder-templates/ai-stand-dev/main.tf requires to already exist in
-# the dedicated rootless daemon's local image store before any workspace
-# build - that daemon has no route to any registry but the public internet,
-# and this image is never published to one. Same reasoning, same "docker
-# build -t tag -" stdin-only approach (no COPY/ADD, see the Dockerfile's own
-# header) as ensure_openclaw_sandbox_image() below, but built against the
-# Coder rootless daemon (a host-level systemd unit, not a container to
-# `docker exec` into - see ensure_coder_rootless_docker_service() just
-# above) rather than openclaw-sandbox-dind, so it needs that daemon's own
-# sudo -u "$CODER_RUNTIME_USER" env DOCKER_HOST=... invocation instead of a
-# plain docker exec.
-#
-# Called right after ensure_coder_rootless_docker_service() in cmd_host,
-# which already blocks until `docker info` succeeds against this same
-# daemon before returning - no separate readiness poll needed here, unlike
-# ensure_openclaw_sandbox_image()'s own wait (that one's prerequisite,
-# ensure_openclaw_sandbox_dind_service, does NOT itself wait for the inner
-# dockerd to finish starting).
-ensure_coder_workspace_image() {
-  [ "$CODER_ENABLED" = "1" ] || return 0
-  [ "$NODE_NAME" = "ai02" ] || return 0
-
-  run_root sudo -u "$CODER_RUNTIME_USER" env \
-    HOME="$CODER_PROVISIONER_HOME" \
-    XDG_RUNTIME_DIR="$CODER_PROVISIONER_RUNTIME" \
-    DOCKER_HOST="unix://${CODER_ROOTLESS_DOCKER_SOCKET}" \
-    docker build -t "$CODER_WORKSPACE_IMAGE" - < "${SCRIPT_DIR}/docker/coder-workspace/Dockerfile"
-
-  log "Coder workspace image ${CODER_WORKSPACE_IMAGE} is available in the Coder rootless daemon"
+  log "Coder workspace images are available in the ai02 Docker daemon"
 }
 
 # registry.terraform.io is geo-blocked from this network - confirmed live
@@ -3087,22 +2967,21 @@ ensure_coder_workspace_image() {
 # controls"), not the JSON `terraform init` expects, so every provider
 # installation attempt against the real registry fails outright. GitHub
 # itself (github.com, api.github.com, and its release-asset download host)
-# is reachable, so mirror the two exact provider builds the ai-stand-dev
-# template pins (docker/coder-templates/ai-stand-dev/main.tf) from their
+# is reachable, so mirror the two exact provider builds the C# and Python
+# templates pin (docker/coder-templates/{csharp,python}/main.tf) from their
 # GitHub releases into a local filesystem_mirror instead - confirmed live
 # the same day: terraform validate fully succeeds against this mirror with
 # no other change. Checksums below are copied verbatim from each release's
 # own published SHA256SUMS file (terraform-provider-coder_2.19.0_SHA256SUMS
 # / terraform-provider-docker_4.6.0_SHA256SUMS), the same pinning approach
-# already used for e.g. the Node.js tarball in this same coder-workspace
-# image (see its own Dockerfile).
+# already used for e.g. the Node.js tarball in the OpenClaw image.
 #
 # The mirror directory and .terraformrc live under CODER_SERVER_DATA
 # (bind-mounted to /home/coder in the coder server container - see
 # compose.coder.yaml) specifically so HOME=/home/coder already set there
 # makes Terraform find .terraformrc with no extra TF_CLI_CONFIG_FILE env
 # var, and so .terraformrc's own `path` is written in the container's own
-# /home/coder terms, not this host's /mnt/storage/... path.
+# /home/coder terms, not this host's storage path.
 ensure_coder_terraform_provider_mirror() {
   [ "$CODER_ENABLED" = "1" ] || return 0
   [ "$NODE_NAME" = "ai02" ] || return 0
@@ -3150,68 +3029,6 @@ provider_installation {
 RC
   install_if_changed "$rc_tmp" "${CODER_SERVER_DATA}/.terraformrc" 0640 "$APP_UID" "$APP_GID"
   rm -f "$rc_tmp"
-}
-
-# openclaw-sandbox:bookworm-slim is the pre-built sandbox image OpenClaw's
-# Docker sandbox backend requires to exist in whatever daemon DOCKER_HOST
-# resolves to before any sandboxed chat session can run - see
-# docker/openclaw-sandbox/Dockerfile for the full citation and why this
-# exact recipe. Must run against openclaw-sandbox-dind directly rather than
-# through openclaw-gateway/DOCKER_HOST: this is called from cmd_host, which
-# runs before cmd_deploy ever creates the openclaw-gateway Swarm service
-# (see cmd_all's phase order), so on a from-scratch install that service
-# does not exist yet. openclaw-sandbox-dind has no such dependency - it's a
-# plain host-level container on ai02's own local Docker Engine
-# (ensure_openclaw_sandbox_dind_service, above), always docker-exec-able
-# once that function has run, and the docker:*-dind image already bundles a
-# full docker CLI talking to its own local daemon, so no DOCKER_HOST/network
-# setup is needed here. No build context is needed either (the sandbox
-# Dockerfile has zero COPY/ADD) - "docker build -t tag -" reads the
-# Dockerfile from stdin only, so this repo checkout never needs to be
-# visible inside openclaw-sandbox-dind.
-#
-# ensure_openclaw_sandbox_dind_service (above) always restarts the dind
-# container, even when nothing changed, so the inner daemon is not
-# guaranteed ready the instant that function returns - Type=simple only
-# waits for the ExecStart process to be launched, not for dockerd inside it
-# to finish initializing. Poll before building instead of assuming it's up.
-#
-# Deliberately omits --pull (unlike this script's docker_cmd build calls in
-# cmd_images): this is meant to be a one-time, idempotent setup step that's
-# a near-instant no-op on repeat runs via Docker's build cache (image layers
-# persist in OPENCLAW_SANDBOX_DATA, the bind-mounted /var/lib/docker, across
-# dind container restarts) - --pull would force a fresh debian:bookworm-slim
-# registry check on every single cmd_host run for no benefit here.
-#
-# Known tradeoff (found 2026-09-13): once built on a given host, the cached
-# debian:bookworm-slim base layer is reused indefinitely - nothing here or
-# in check_openclaw_sandbox_image() ever forces a fresh pull or checks the
-# image's age, so this sandbox can silently keep running on an arbitrarily
-# stale, unpatched Debian snapshot. That matters more for this container
-# than for a typical throwaway build cache, since its whole purpose is to
-# sandbox less-trusted code execution. Accepted for now given the speed
-# benefit above; if this ever needs hardening, the fix is a periodic forced
-# rebuild (e.g. re-running with --pull on some cadence), not just adding
-# --pull here unconditionally (which would reintroduce the per-cmd_host-run
-# registry check this was written to avoid).
-ensure_openclaw_sandbox_image() {
-  local deadline=$(( $(date +%s) + 120 ))
-  local dind_ready=""
-
-  while [ "$(date +%s)" -lt "$deadline" ]; do
-    if docker_cmd exec ai-stand-openclaw-sandbox-dind docker info >/dev/null 2>&1; then
-      dind_ready="1"
-      break
-    fi
-    sleep 2
-  done
-  [ "$dind_ready" = "1" ] \
-    || die "openclaw-sandbox-dind daemon did not become ready for 'docker exec' within 120s"
-
-  docker_cmd exec -i ai-stand-openclaw-sandbox-dind \
-    docker build -t "$OPENCLAW_SANDBOX_IMAGE" - < "${SCRIPT_DIR}/docker/openclaw-sandbox/Dockerfile"
-
-  log "OpenClaw sandbox image ${OPENCLAW_SANDBOX_IMAGE} is available in openclaw-sandbox-dind"
 }
 
 NGINX_BACKUP_KEEP_COUNT="${NGINX_BACKUP_KEEP_COUNT:-10}"
@@ -3269,15 +3086,128 @@ install_nginx() {
   # (confirmed live 2026-09-11, nginx -t fails with ENOENT on it otherwise).
   install_if_changed "$NGINX_MIME_TYPES_SOURCE" /etc/nginx/mime.types 0644 root root
 
-  if ! run_root test -f /etc/nginx/conf.d/ai-stand.conf || ! run_root cmp -s "$NGINX_SITE_SOURCE" /etc/nginx/conf.d/ai-stand.conf; then
+  # The site sources are templates: every installation value is a @PLACEHOLDER@ (the storage root, the certificate directory,
+  # the public host names and the two nodes' addresses); the installed file has them filled in from the profile.
+  local site_rendered ai01_ip ai02_ip
+  if [ "$NODE_NAME" = "ai01" ]; then ai01_ip="$HOST_IP"; ai02_ip="$PEER_IP"; else ai01_ip="$PEER_IP"; ai02_ip="$HOST_IP"; fi
+  site_rendered="$(mktemp)"
+  sed -e "s#@STORAGE_ROOT@#${STORAGE_ROOT}#g" -e "s#@CERT_DIR@#${CERT_DIR}#g" \
+    -e "s#@AI01_IP@#${ai01_ip}#g" -e "s#@AI02_IP@#${ai02_ip}#g" \
+    -e "s#@AUTHENTIK_HOST@#${AUTHENTIK_HOST}#g" -e "s#@OPENWEBUI_HOST@#${OPENWEBUI_HOST}#g" \
+    -e "s#@PORTAINER_HOST@#${PORTAINER_HOST}#g" -e "s#@AGENTGATEWAY_HOST@#${AGENTGATEWAY_HOST}#g" \
+    -e "s#@GITEA_HOST@#${GITEA_HOST}#g" -e "s#@OPENCLAW_HOST@#${OPENCLAW_HOST}#g" -e "s#@CODER_HOST@#${CODER_HOST}#g" \
+    "$NGINX_SITE_SOURCE" > "$site_rendered"
+  if grep -qE '@[A-Z0-9_]+@' "$site_rendered"; then
+    rm -f "$site_rendered"
+    die "${NGINX_SITE_SOURCE} still has an unfilled placeholder after rendering"
+  fi
+  if ! run_root test -f /etc/nginx/conf.d/ai-stand.conf || ! run_root cmp -s "$site_rendered" /etc/nginx/conf.d/ai-stand.conf; then
     backup_nginx_once
   fi
-  install_if_changed "$NGINX_SITE_SOURCE" /etc/nginx/conf.d/ai-stand.conf 0644 root root
+  install_if_changed "$site_rendered" /etc/nginx/conf.d/ai-stand.conf 0644 root root
+  rm -f "$site_rendered"
+
+  # The packaged unit never restarts nginx. A restart that fails once (a DNS
+  # hiccup on an upstream name took ai02 down for eight hours on 2026-10-23)
+  # then stays failed until someone notices; retry instead.
+  local dropin="/etc/systemd/system/nginx.service.d/ai-stand-restart.conf" dropin_changed=0
+  run_root install -d -m 0755 /etc/systemd/system/nginx.service.d
+  run_root cmp -s "$NGINX_RESTART_DROPIN_SOURCE" "$dropin" 2>/dev/null || dropin_changed=1
+  install_if_changed "$NGINX_RESTART_DROPIN_SOURCE" "$dropin" 0644 root root
+  [ "$dropin_changed" = 0 ] || run_root systemctl daemon-reload
+
+  install_nginx_reload_units
 
   run_root nginx -t >/dev/null
   run_root systemctl enable --now nginx >/dev/null
   run_root systemctl reload nginx
   log "Nginx configuration applied"
+}
+
+# nginx stays on the host, but the certificate is installed from containers (the controller's certbot job and the
+# cert-receiver), which cannot reach the host's nginx. This path unit notices a changed lineage, tests the configuration,
+# reloads nginx and records the fingerprint of the certificate it serves in $CERTBOT_DATA/.served-fingerprint, which the
+# containers wait for (certbot/served.sh). It is the only host-side piece of the certificate automation.
+install_nginx_reload_units() {
+  [ "${CERTBOT_ENABLED:-0}" = "1" ] || return 0
+  local kind rendered target changed=0
+  for kind in path service; do
+    rendered="$(mktemp)"
+    sed -e "s#@CERT_DOMAIN@#${CERT_DOMAIN}#g" -e "s#@CERTBOT_DATA@#${CERTBOT_DATA}#g" \
+      -e "s#@PROBE_HOST@#${PORTAINER_HOST}#g" \
+      "${NGINX_RELOAD_UNIT_SOURCE_DIR}/ai-stand-nginx-reload.${kind}" > "$rendered"
+    target="/etc/systemd/system/ai-stand-nginx-reload.${kind}"
+    run_root cmp -s "$rendered" "$target" 2>/dev/null || changed=1
+    install_if_changed "$rendered" "$target" 0644 root root
+    rm -f "$rendered"
+  done
+  [ "$changed" = 0 ] || run_root systemctl daemon-reload
+  run_root systemctl enable --now ai-stand-nginx-reload.path >/dev/null
+}
+
+# The settings the certificate automation needs, checked early. The DNS credentials file is created by the owner; until
+# it exists renewal stays inactive (the controller's certbot job says so in its log).
+validate_certbot_profile() {
+  [ "${CERTBOT_ENABLED:-0}" = "1" ] || return 0
+  [ -n "$CERTBOT_EMAIL" ] && [ -n "$CERTBOT_CREDENTIALS_NAME" ] && [ -n "$CERTBOT_HOOK_SOURCE" ] \
+    || die "CERTBOT_ENABLED needs CERTBOT_EMAIL, CERTBOT_CREDENTIALS_NAME and CERTBOT_HOOK_SOURCE in the installation profile"
+  [ -f "${INSTALLATION_DIR}/${CERTBOT_HOOK_SOURCE}" ] \
+    || die "The DNS hook ${INSTALLATION_DIR}/${CERTBOT_HOOK_SOURCE} is missing"
+  [ "${CONTROLLER_ENABLED:-0}" = "1" ] || die "CERTBOT_ENABLED needs CONTROLLER_ENABLED=1: the controller runs the renewal"
+  if ! run_root test -r "${AI_STAND_SECRETS_DIR}/${CERTBOT_CREDENTIALS_NAME}"; then
+    warn "Certificate renewal is INACTIVE until ${AI_STAND_SECRETS_DIR}/${CERTBOT_CREDENTIALS_NAME} exists (see certbot/README.md)"
+  fi
+}
+
+build_controller_image() {
+  [ "${CONTROLLER_ENABLED:-0}" = "1" ] || return 0
+  docker_cmd build --build-arg "BASE_IMAGE=${BASE_IMAGE}" --tag "$CONTROLLER_IMAGE" -f docker/controller/Dockerfile .
+  # The certbot job runs the official image as a sibling container.
+  if [ "$NODE_NAME" != "ai02" ] && [ "${CERTBOT_ENABLED:-0}" = "1" ]; then
+    docker_cmd image inspect "$CERTBOT_IMAGE" >/dev/null 2>&1 || docker_cmd pull "$CERTBOT_IMAGE"
+  fi
+}
+
+build_gitea_ssh_sync_image() {
+  [ "${GITEA_SSH_SYNC_ENABLED:-0}" = "1" ] || return 0
+  docker_cmd build --build-arg "BASE_IMAGE=${BASE_IMAGE}" --tag "$GITEA_SSH_SYNC_IMAGE" -f docker/gitea-ssh-sync/Dockerfile .
+}
+
+# Also callable alone through the stage driver, to roll a changed OpenClaw image without rebuilding llama.cpp.
+build_openclaw_image() {
+  docker_cmd build --build-arg "BASE_IMAGE=${BASE_IMAGE}" --build-arg "OPENCLAW_VERSION=${OPENCLAW_VERSION}" --target openclaw --tag "$OPENCLAW_IMAGE" -f docker/openclaw/Dockerfile .
+}
+
+# One image, two services: the sender on the Authentik node and the receiver on the Coder node.
+build_ssh_key_delivery_image() {
+  [ "${SSH_KEY_DELIVERY_ENABLED:-0}" = "1" ] || return 0
+  docker_cmd build --build-arg "BASE_IMAGE=${BASE_IMAGE}" --tag "$SSH_KEY_DELIVERY_IMAGE" -f docker/ssh-key-delivery/Dockerfile .
+}
+
+# The values compose.controller.yaml interpolates; everything the jobs need comes from the installation profile.
+export_controller_environment() {
+  [ "${CONTROLLER_ENABLED:-0}" = "1" ] || return 0
+  local jobs="model-access" hook_name="" peer_url="" replicas=0
+  [ "${READONLY_MCP_ENABLED:-0}" != "1" ] || jobs="reconcile,${jobs}"
+  [ "${CERTBOT_ENABLED:-0}" != "1" ] || jobs="${jobs},certbot"
+  CONTROLLER_CERTBOT_HOOK_DIR=""; CONTROLLER_CERTBOT_CREDENTIALS=""
+  CONTROLLER_CERTBOT_AUTH_HOOK=""; CONTROLLER_CERTBOT_CLEANUP_HOOK=""
+  if [ "${CERTBOT_ENABLED:-0}" = "1" ]; then
+    hook_name="$(basename "$CERTBOT_HOOK_SOURCE")"
+    CONTROLLER_CERTBOT_HOOK_DIR="$(dirname "${INSTALLATION_DIR}/${CERTBOT_HOOK_SOURCE}")"
+    CONTROLLER_CERTBOT_CREDENTIALS="${AI_STAND_SECRETS_DIR}/${CERTBOT_CREDENTIALS_NAME}"
+    CONTROLLER_CERTBOT_AUTH_HOOK="python3 /hooks/${hook_name} auth"
+    CONTROLLER_CERTBOT_CLEANUP_HOOK="python3 /hooks/${hook_name} cleanup"
+    if [ "${CERTBOT_RECEIVER_ENABLED:-0}" = "1" ]; then peer_url="http://cert-receiver:8443"; replicas=1; fi
+  fi
+  CONTROLLER_JOBS="$jobs"
+  CONTROLLER_INSTALLATION="$INSTALLATION"
+  CONTROLLER_CERTBOT_PEER_URL="$peer_url"
+  CONTROLLER_RECEIVER_REPLICAS="$replicas"
+  AI_STAND_DIR="$SCRIPT_DIR"
+  export CONTROLLER_IMAGE CONTROLLER_JOBS CONTROLLER_INSTALLATION AI_STAND_DIR AI_STAND_MODULES_ROOT \
+    CERT_DOMAIN CERTBOT_IMAGE CERTBOT_EMAIL CERTBOT_DATA CONTROLLER_CERTBOT_HOOK_DIR CONTROLLER_CERTBOT_CREDENTIALS \
+    CONTROLLER_CERTBOT_AUTH_HOOK CONTROLLER_CERTBOT_CLEANUP_HOOK CONTROLLER_CERTBOT_PEER_URL CONTROLLER_RECEIVER_REPLICAS
 }
 
 install_agentgateway_config() {
@@ -3303,18 +3233,14 @@ require_readonly_mcp_sources() {
     "$JIRA_READONLY_MCP_SOURCE_DIR/Dockerfile" \
     "$CONFLUENCE_READONLY_MCP_SOURCE_DIR/Dockerfile" \
     "$IMAP_READONLY_MCP_SOURCE_DIR/Dockerfile" \
-    "$GIGACODE_SUBSCRIPTION_BRIDGE_SOURCE_DIR/Dockerfile" \
     "$READONLY_MCP_RENDERER" \
-    "$READONLY_MCP_RECONCILER" \
-    "$METAMCP_TENANT_CONTROL_SOURCE_DIR/provision.py" \
-    "$METAMCP_TENANT_CONTROL_SOURCE_DIR/tenant_manifest.py" \
-    "$METAMCP_TENANT_CONTROL_SOURCE_DIR/tenant_runtime.py"; do
+    "$READONLY_MCP_RECONCILER"; do
     [ -f "$path" ] || die "Read-only MCP source is missing: $path"
   done
 }
 
 # Read only non-secret deployment settings from the root-owned reconciler
-# configuration. The AppRole/Authentik token values themselves are stored in
+# configuration. The Authentik token values themselves are stored in
 # files named by that document and are never read by apply.sh.
 readonly_mcp_setting() {
   local key="$1"
@@ -3373,8 +3299,7 @@ render_readonly_mcp_profile() {
     --imap-tls-mode "$imap_tls_mode" \
     --jira-image "$JIRA_READONLY_MCP_IMAGE" \
     --confluence-image "$CONFLUENCE_READONLY_MCP_IMAGE" \
-    --imap-image "$IMAP_READONLY_MCP_IMAGE" \
-    --gigacode-image "$GIGACODE_SUBSCRIPTION_BRIDGE_IMAGE"
+    --imap-image "$IMAP_READONLY_MCP_IMAGE"
 
   run_root install -d -m 0750 -o "$APP_UID" -g "$APP_GID" "$AGENTGATEWAY_DATA"
   install_if_changed "$rendered_compose" "$READONLY_MCP_RENDERED_COMPOSE" 0640 "$APP_UID" "$APP_GID"
@@ -3388,7 +3313,7 @@ import json
 import re
 import sys
 
-secret = re.compile(r"^ai-stand-(?:mcp|gigacode)-[a-z0-9-]{3,100}$")
+secret = re.compile(r"^ai-stand-mcp-[a-z0-9-]{3,100}$")
 with open(sys.argv[1], encoding="utf-8") as handle:
     manifest = json.load(handle)
 if manifest.get("version") != 2 or not isinstance(manifest.get("users"), list):
@@ -3402,22 +3327,9 @@ for user in manifest["users"]:
             value = service.get("internalTokenSecret")
             if isinstance(value, str) and secret.fullmatch(value):
                 names.add(value)
-    personal = user.get("metamcp")
-    if isinstance(personal, dict):
-        value = personal.get("backendKeySecret")
-        if isinstance(value, str) and secret.fullmatch(value):
-            names.add(value)
 for value in sorted(names):
     print(value)
 PY
-  # The user-scoped GigaCode routes validate broker-signed JWTs.  A core
-  # deploy mounts this public JWKS through its own compose overlay, but the
-  # narrow five-minute MCP reconciliation must also be self-sufficient: it
-  # can be the first operation that installs those routes.  This is a public
-  # verification key, never a Device ID or signing secret.
-  if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then
-    printf '%s\n' "$GIGACODE_IDENTITY_BROKER_JWKS_SECRET"
-  fi
 }
 
 sync_readonly_mcp_runtime() {
@@ -3438,7 +3350,7 @@ sync_readonly_mcp_runtime() {
     [ -n "$secret" ] && current_secrets+=("$secret")
   done < <(
     docker_cmd service inspect "$gateway_service" --format '{{json .Spec.TaskTemplate.ContainerSpec.Secrets}}' \
-      | jq -r '.[]? | (.SecretName // .File.Name // empty) | select(test("^ai-stand-(mcp|gigacode)-"))'
+      | jq -r '.[]? | (.SecretName // .File.Name // empty) | select(test("^ai-stand-mcp-"))'
   )
 
   # Mount new backend tokens before their route configuration becomes live.
@@ -3476,7 +3388,7 @@ sync_readonly_mcp_runtime() {
   # network.  It never declares Agentgateway, Open WebUI, OpenClaw, LM
   # Studio or Authentik, so a five-minute reconcile cannot overwrite an
   # active model/context profile.
-  docker_cmd stack config -c "$READONLY_MCP_RENDERED_COMPOSE" >/tmp/ai-stand-readonly-mcp-stack-config.yaml
+  docker_cmd stack config -c "$READONLY_MCP_RENDERED_COMPOSE" >/dev/null
   docker_cmd stack deploy --resolve-image never -c "$READONLY_MCP_RENDERED_COMPOSE" "$STACK_NAME"
 
   install_if_changed "$READONLY_MCP_RENDERED_AGENTGATEWAY_CONFIG" "${AGENTGATEWAY_DATA}/config.yaml" 0640 "$APP_UID" "$APP_GID"
@@ -3494,16 +3406,42 @@ sync_readonly_mcp_runtime() {
     done
     [ "$wanted" = "1" ] || reload_args+=(--secret-rm "$current")
   done
-  docker_cmd service update --detach=true "${reload_args[@]}" "$gateway_service" >/dev/null
-  sleep 2
-  wait_service_ready "$gateway_service"
+  if [ "${#reload_args[@]}" -gt 0 ]; then
+    docker_cmd service update --detach=true "${reload_args[@]}" "$gateway_service" >/dev/null
+    sleep 2
+    wait_service_ready "$gateway_service"
+  fi
+
+  # The Telegram ids and groups the reconciler collected from Authentik: the people (ai-users attributes), the bot's
+  # owner and its groups (the owner account's attributes). A change restarts the gateway, like any service environment
+  # change. init.mjs validates all three again before it writes them.
+  local telegram_allow_from telegram_owner_ids telegram_groups
+  # The pattern lives in a variable on purpose: inside [[ =~ ]] anything in quotes is literal text.
+  local telegram_id_list='^\[("[0-9]{5,15}"(,"[0-9]{5,15}")*)?\]$'
+  telegram_allow_from="$(jq -c '[(.telegram.userIds // [])[] | tostring]' "$READONLY_MCP_MANIFEST")"
+  [[ "$telegram_allow_from" =~ $telegram_id_list ]] \
+    || die "Unexpected Telegram user id list in the read-only MCP manifest"
+  telegram_owner_ids="$(jq -c '[(.telegram.ownerIds // [])[] | tostring]' "$READONLY_MCP_MANIFEST")"
+  [[ "$telegram_owner_ids" =~ $telegram_id_list ]] \
+    || die "Unexpected Telegram owner id list in the read-only MCP manifest"
+  # No "groups" key (attribute missing or unreadable): empty, which leaves the gateway's groups alone. An object, even an
+  # empty one, is the complete list of groups.
+  telegram_groups="$(jq -c 'if ((.telegram // {}) | has("groups")) then .telegram.groups else "" end' "$READONLY_MCP_MANIFEST")"
+  [ "$telegram_groups" = '""' ] && telegram_groups=""
+  if [ -n "$telegram_groups" ]; then
+    [ "$(jq -r 'type' <<<"$telegram_groups")" = "object" ] && [ "${#telegram_groups}" -le 16384 ] \
+      || die "Unexpected Telegram group list in the read-only MCP manifest"
+  fi
 
   # Install the managed remote MCP entries without touching the active
   # models, Codex/Claude subscription runtimes or user-created connections.
   update_service_env openclaw-gateway \
     "OPENCLAW_READONLY_MCP_ENABLED=1" \
     "OPENCLAW_READONLY_MCP_BASE_URL=https://${AGENTGATEWAY_HOST}" \
-    "OPENCLAW_READONLY_MCP_PATH_PREFIX=${READONLY_MCP_PATH_PREFIX}"
+    "OPENCLAW_READONLY_MCP_PATH_PREFIX=${READONLY_MCP_PATH_PREFIX}" \
+    "OPENCLAW_TELEGRAM_ALLOW_FROM=${telegram_allow_from}" \
+    "OPENCLAW_TELEGRAM_OWNER_IDS=${telegram_owner_ids}" \
+    "OPENCLAW_TELEGRAM_GROUPS=${telegram_groups}"
 
   rm -rf "$READONLY_MCP_RENDER_DIR"
   unset READONLY_MCP_RENDERED_AGENTGATEWAY_CONFIG READONLY_MCP_RENDER_DIR
@@ -3522,7 +3460,7 @@ install_authentik_icons() {
   # convention instead of carving out an exception from it.
   run_root usermod -a -G storage www-data
   local file
-  for file in openwebui.png portainer.svg metamcp.ico agentgateway.svg openclaw.png coder.svg; do
+  for file in openwebui.png portainer.svg agentgateway.svg openclaw.png coder.svg gitea.svg; do
     install_if_changed "${AUTHENTIK_ICONS_SOURCE_DIR}/${file}" "${AUTHENTIK_ICONS_DATA}/${file}" 0640 "$APP_UID" "$APP_GID"
   done
   # usermod only takes effect for processes spawned after it runs - nginx's
@@ -3539,18 +3477,24 @@ ensure_node_labels() {
 
   case "$NODE_NAME" in
     ai01)
+      # Coder's image, Socket Proxy and persistent workspace
+      # storage deliberately exist only on ai02. Advertising the Coder label
+      # on ai01 lets Swarm schedule an unpullable local image there.
       docker_cmd node update \
         --label-add ai-stand.node=ai01 \
         --label-add ai-stand.role=manager \
         --label-add ai-stand.ingress=true \
-        --label-add ai-stand.lmstudio=true \
+        --label-add ai-stand.llamacpp01=true \
+        --label-add ai-stand.llamacpp02=false \
         --label-add ai-stand.openwebui=true \
         --label-add ai-stand.openclaw=false \
         --label-add ai-stand.authentik=true \
         --label-add ai-stand.portainer=true \
-        --label-add ai-stand.metamcp=true \
         --label-add ai-stand.agentgateway=true \
-        --label-add ai-stand.coder=true \
+        --label-add ai-stand.gitea=true \
+        --label-add ai-stand.coder=false \
+        --label-add ai-stand.controller=true \
+        --label-add ai-stand.cert-receiver=false \
         --label-add "ai-stand.accelerator=${accelerator}" \
         "$node_id" >/dev/null
       ;;
@@ -3559,14 +3503,17 @@ ensure_node_labels() {
         --label-add ai-stand.node=ai02 \
         --label-add ai-stand.role=manager \
         --label-add ai-stand.ingress=true \
-        --label-add ai-stand.lmstudio=false \
+        --label-add ai-stand.llamacpp01=false \
+        --label-add ai-stand.llamacpp02=true \
         --label-add ai-stand.openwebui=false \
         --label-add ai-stand.openclaw=true \
         --label-add ai-stand.authentik=false \
         --label-add ai-stand.portainer=false \
-        --label-add ai-stand.metamcp=false \
         --label-add ai-stand.agentgateway=false \
+        --label-add ai-stand.gitea=false \
         --label-add ai-stand.coder=true \
+        --label-add ai-stand.controller=false \
+        --label-add ai-stand.cert-receiver=true \
         --label-add ai-stand.accelerator=none \
         "$node_id" >/dev/null
       ;;
@@ -3577,7 +3524,8 @@ ensure_node_labels() {
 
   docker_cmd node update --label-rm ai-stand.storage "$node_id" >/dev/null 2>&1 || true
   docker_cmd node update --label-rm ai-stand.amd "$node_id" >/dev/null 2>&1 || true
-  docker_cmd node update --label-rm ai-stand.vault "$node_id" >/dev/null 2>&1 || true
+  docker_cmd node update --label-rm ai-stand.llamacpp "$node_id" >/dev/null 2>&1 || true
+  docker_cmd node update --label-rm ai-stand.gitlab "$node_id" >/dev/null 2>&1 || true
   log "Swarm node labels ensured on ${node_id}: node=${NODE_NAME}"
 }
 
@@ -3592,24 +3540,16 @@ compose_args_for_accelerator() {
     *) die "Unknown resolved accelerator: ${accelerator}" ;;
   esac
 
-  # GigaCode is rendered only by the user-scoped reconciler.  Never merge a
-  # global bridge into the core stack: it would make a shared Device ID
-  # reachable by machine API tokens before per-subject authorization runs.
-  if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then
-    printf '%s\n' "-c" "$COMPOSE_GIGACODE_IDENTITY_BROKER_FILE"
-    printf '%s\n' "-c" "$COMPOSE_OPENCLAW_GIGACODE_ADAPTER_FILE"
-  fi
-
   if [ "$CODER_ENABLED" = "1" ]; then
     printf '%s\n' "-c" "$COMPOSE_CODER_FILE"
-    # A profile may pin Coder's browser-facing URLs.  Docker stack deploy
-    # has historically handled process environment interpolation differently
-    # from docker compose on some hosts; an explicit final overlay keeps the
-    # initial Coder task bootable before drift reconciliation runs.
-    local installation_coder_compose="${INSTALLATION_DIR}/compose.coder.yaml"
-    if [ -r "$installation_coder_compose" ]; then
-      printf '%s\n' "-c" "$installation_coder_compose"
-    fi
+  fi
+
+  if [ "${GITEA_ENABLED:-0}" = "1" ]; then
+    printf '%s\n' "-c" "$COMPOSE_GITEA_FILE"
+  fi
+
+  if [ "${CONTROLLER_ENABLED:-0}" = "1" ]; then
+    printf '%s\n' "-c" "$COMPOSE_CONTROLLER_FILE"
   fi
 
   # User-scoped MCP services are deliberately not part of the generic stack
@@ -3618,20 +3558,33 @@ compose_args_for_accelerator() {
   # installation-specific model/context profile.
 }
 
-lmstudio_image_for_accelerator() {
+llamacpp_image_for_accelerator() {
   case "$1" in
-    cpu) printf '%s\n' "$LMSTUDIO_CPU_IMAGE" ;;
-    amd) printf '%s\n' "$LMSTUDIO_AMD_IMAGE" ;;
-    nvidia) printf '%s\n' "$LMSTUDIO_NVIDIA_IMAGE" ;;
+    cpu) printf '%s\n' "$LLAMACPP_CPU_IMAGE" ;;
+    amd)
+      local image_key
+      case "${NODE_NAME:-}" in
+        ai01|ai02)
+          image_key="LLAMACPP${NODE_NAME#ai}_AMD_IMAGE"
+          [ -n "${!image_key:-}" ] || die "Node-specific AMD image is unavailable for ${NODE_NAME}; provide both node GFX settings"
+          printf '%s\n' "${!image_key}"
+          ;;
+        *)
+          [[ "${AMD_ROCM_GFX_VERSION:-}" =~ ^gfx[0-9a-f]{3,5}$ ]] || die "AMD_ROCM_GFX_VERSION is required for an unpinned AMD image build"
+          printf '%s\n' "ghcr.io/kukurusik/ai-stand-llamacpp:${LLAMACPP_IMAGE_VERSION}-amd-${AMD_ROCM_GFX_VERSION}"
+          ;;
+      esac
+      ;;
+    nvidia) printf '%s\n' "$LLAMACPP_NVIDIA_IMAGE" ;;
     *) die "Unknown resolved accelerator: $1" ;;
   esac
 }
 
-lmstudio_target_for_accelerator() {
+llamacpp_target_for_accelerator() {
   case "$1" in
-    cpu) printf '%s\n' "lmstudio" ;;
-    amd) printf '%s\n' "lmstudio-amd" ;;
-    nvidia) printf '%s\n' "lmstudio-nvidia" ;;
+    cpu) printf '%s\n' "llamacpp-cpu" ;;
+    amd) printf '%s\n' "llamacpp-amd" ;;
+    nvidia) printf '%s\n' "llamacpp-nvidia" ;;
     *) die "Unknown resolved accelerator: $1" ;;
   esac
 }
@@ -3640,7 +3593,7 @@ cmd_preflight() {
   load_os_info
   check_reboot_marker_readonly
   local accelerator="none"
-  if [ "$NODE_NAME" = "ai01" ]; then
+  if [ "$NODE_NAME" = "ai01" ] || [ "$NODE_NAME" = "ai02" ]; then
     accelerator="$(detect_accelerator)"
     validate_accelerator_compatibility "$accelerator"
   fi
@@ -3648,24 +3601,95 @@ cmd_preflight() {
   log "Host OS: Ubuntu ${OS_VERSION_ID} (${OS_CODENAME}), arch=${ARCH}, accelerator=${accelerator}"
   check_disk
   check_docker_preflight
-  if [ "$NODE_NAME" = "ai01" ]; then
+  if [ "$NODE_NAME" = "ai01" ] || [ "$NODE_NAME" = "ai02" ]; then
     check_accelerator_preflight "$accelerator"
-  else
-    log "Accelerator preflight skipped on ai02; LM Studio is pinned to ai01"
   fi
   check_cert_preflight
+  check_legacy_storage_maintenance_safety
 
   check_node_dns
 
   log "Preflight complete"
 }
 
+archive_legacy_gitlab_data() {
+  [ "$NODE_NAME" = "ai02" ] || return 0
+  run_root test -d "$LEGACY_GITLAB_DATA_ROOT" || return 0
+
+  # GitLab is retired in favour of Gitea. Stop its old service before taking
+  # a filesystem archive so PostgreSQL and repository files are consistent.
+  # This intentionally does not delete the source directory or attempt an
+  # automatic import into Gitea.
+  local legacy_service="${STACK_NAME}_gitlab"
+  if docker_cmd service inspect "$legacy_service" >/dev/null 2>&1; then
+    docker_cmd service scale --detach=true "${legacy_service}=0" >/dev/null
+    local deadline=$(( $(date +%s) + 300 ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      if ! docker_cmd ps --filter "label=com.docker.swarm.service.name=${legacy_service}" --format '{{.ID}}' | grep -q .; then
+        break
+      fi
+      sleep 2
+    done
+    if docker_cmd ps --filter "label=com.docker.swarm.service.name=${legacy_service}" --format '{{.ID}}' | grep -q .; then
+      die "Legacy GitLab did not stop within five minutes; refusing to archive a live database"
+    fi
+  fi
+
+  local stamp_file archive checksum
+  stamp_file="${LEGACY_GITLAB_ARCHIVE_ROOT}/gitlab-data.sha256"
+  if run_root test -s "$stamp_file"; then
+    log "Legacy GitLab archive already exists; source data remains preserved"
+    return 0
+  fi
+  run_root install -d -m 0700 -o root -g root "$LEGACY_GITLAB_ARCHIVE_ROOT"
+  archive="${LEGACY_GITLAB_ARCHIVE_ROOT}/gitlab-data-${RUN_TS}.tar"
+  checksum="${archive}.sha256"
+  run_root tar --acls --xattrs --numeric-owner -C "$STORAGE_ROOT" -cf "$archive" gitlab-data
+  run_root sh -c 'sha256sum "$1" > "$2"' sh "$archive" "$checksum"
+  run_root cp "$checksum" "$stamp_file"
+  run_root chown root:root "$archive" "$checksum" "$stamp_file"
+  run_root chmod 0600 "$archive" "$checksum" "$stamp_file"
+  log "Legacy GitLab data is archived; no automatic Gitea migration was performed"
+}
+
+# The hosts' own clock zone is the installation's IM_TZ, the one the services get, so journals, cron and logs of both nodes read
+# alike. The hardware clock stays UTC; nothing is restarted by the change.
+host_timezone() {
+  timedatectl show --property=Timezone --value 2>/dev/null || true
+}
+
+ensure_host_timezone() {
+  local current
+  current="$(host_timezone)"
+  if [ -z "$current" ]; then
+    warn "timedatectl is unavailable, the host time zone was not checked"
+    return 0
+  fi
+  if [ "$current" = "$IM_TZ" ]; then
+    log "Host time zone is already ${IM_TZ}"
+    return 0
+  fi
+  run_root test -e "/usr/share/zoneinfo/${IM_TZ}" || die "Time zone ${IM_TZ} is not installed on this host"
+  run_root timedatectl set-timezone "$IM_TZ"
+  log "Host time zone changed from ${current} to ${IM_TZ}"
+}
+
+check_host_timezone() {
+  local current
+  current="$(host_timezone)"
+  [ -z "$current" ] || [ "$current" = "$IM_TZ" ] \
+    || die "Host time zone is ${current}, the installation says ${IM_TZ}; run the host stage"
+}
+
 cmd_host() {
   load_os_info
   check_reboot_marker
   ensure_base_packages
+  ensure_host_timezone
+  backup_nginx_once
+  ensure_nginx_repo
   local accelerator="none"
-  if [ "$NODE_NAME" = "ai01" ]; then
+  if [ "$NODE_NAME" = "ai01" ] || [ "$NODE_NAME" = "ai02" ]; then
     accelerator="$(detect_accelerator)"
     validate_accelerator_compatibility "$accelerator"
   fi
@@ -3674,11 +3698,10 @@ cmd_host() {
   configure_firewalld
   ensure_swarm
   cleanup_stale_swarm_nodes_after_recovery
+  archive_legacy_gitlab_data
   ensure_authentik_secrets
-  if [ "$NODE_NAME" = "ai01" ]; then
+  if [ "$NODE_NAME" = "ai01" ] || [ "$NODE_NAME" = "ai02" ]; then
     ensure_accelerator_runtime "$accelerator"
-  else
-    log "Accelerator runtime installation skipped on ai02; LM Studio is pinned to ai01"
   fi
   ensure_storage
   validate_readonly_mcp_runtime_override_permissions
@@ -3686,18 +3709,81 @@ cmd_host() {
   configure_firewalld
   install_docker_user_helper
   if [ "$NODE_NAME" = "ai02" ]; then
-    ensure_openclaw_sandbox_dind_service
-    ensure_openclaw_sandbox_image
-    ensure_coder_rootless_docker_service
-    ensure_coder_workspace_image
+    ensure_coder_workspace_images
     ensure_coder_terraform_provider_mirror
   fi
   install_nginx
+  validate_certbot_profile
   install_agentgateway_config
-  install_readonly_mcp_reconciler
+  install_openwebui_model_access
   install_authentik_icons
   ensure_node_labels "$accelerator"
   log "Host stage complete for accelerator=${accelerator}"
+}
+
+verify_llamacpp_built_image() {
+  local image="$1" accelerator="$2"
+  local commit archive native_tag gfx=""
+  commit="$(jq -er '.runtime.commit' "${SCRIPT_DIR}/model-catalog/catalog.lock.json")"
+  archive="$(jq -er '.runtime.archiveSha256' "${SCRIPT_DIR}/model-catalog/catalog.lock.json")"
+  native_tag="$(jq -er '.runtime.tag' "${SCRIPT_DIR}/model-catalog/catalog.lock.json")"
+  if [ "$accelerator" = amd ]; then gfx="$AMD_ROCM_GFX_VERSION"; fi
+  docker_cmd run --rm --network none --read-only --entrypoint python3 "$image" -c '
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+m = json.loads(Path("/opt/llamacpp-build.json").read_text())
+expected = dict(commit=sys.argv[1], archiveSha256=sys.argv[2], accelerator=sys.argv[3], gfx=sys.argv[4])
+if any(m.get(k) != v for k, v in expected.items()) or m.get("nativeTag") != sys.argv[6]:
+    raise SystemExit("Native llama.cpp build provenance mismatch")
+if sys.argv[3] == "amd" and m.get("rocmVersion") != sys.argv[5]:
+    raise SystemExit("ROCm release mismatch")
+if sys.argv[3] == "amd":
+    # readobj is read-only; objdump --offloading extracts bundle files beside
+    # the inspected library and is unsuitable for an immutable runtime.
+    output = subprocess.run(
+        ["/opt/rocm/llvm/bin/llvm-readobj", "--offloading", "/opt/llamacpp/bin/libggml-hip.so"],
+        check=True, capture_output=True, text=True, timeout=60,
+    ).stdout
+    bundles = re.findall(
+        r"(?m)^hip-amdgcn-amd-amdhsa--(gfx[0-9a-f]+)(?::[^\t ]+)?\s+file://[^\n]*#offset=\d+&size=([1-9]\d*)$",
+        output,
+    )
+    if not bundles or {architecture for architecture, size in bundles} != {sys.argv[4]}:
+        raise SystemExit("Native HIP code bundles do not match the required GFX architecture")
+' "$commit" "$archive" "$accelerator" "$gfx" "$AMD_ROCM_RELEASE" "$native_tag" \
+    || die "Built native model image failed provenance verification"
+  if [ "$accelerator" = amd ]; then
+    local built_gfx
+    built_gfx="$(docker_cmd image inspect "$image" --format '{{ index .Config.Labels "org.ai-stand.rocm.gfx" }}')"
+    [ "$built_gfx" = "$gfx" ] || die "Built AMD image architecture label mismatch"
+  fi
+  # Root-only inspection can hide missing traversal bits on COPY-created
+  # directories. Exercise the installed wrapper and full native argv as the
+  # real UID, offline and without models, GPU devices, secrets or inference.
+  docker_cmd run --rm --user 10000:20000 --network none --read-only --cap-drop ALL \
+    --entrypoint python3 "$image" -c '
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+s = importlib.util.spec_from_file_location("native_runtime", "/usr/local/lib/llamacpp/runtime.py")
+m = importlib.util.module_from_spec(s)
+sys.modules[s.name] = m
+s.loader.exec_module(m)
+for role in ("chat", "embedding"):
+    environment = dict(os.environ, LLAMACPP_ROLE=role, LLAMACPP_MODEL_ID="build-cli-probe", LLAMACPP_MODEL_SHA256="0" * 64)
+    config = m.Config.read(environment)
+    projector = Path("/models/cli-projector.gguf") if role == "chat" else None
+    command = m.command(config, Path("/models/cli-probe.gguf"), projector)
+    result = subprocess.run(command + ["--help"], capture_output=True, timeout=60)
+    if result.returncode:
+        raise SystemExit("Pinned native CLI rejected runtime arguments")
+' || die "Built native image failed non-root traversal/CLI smoke test"
+  log "Verified local native image provenance: ${image} (${accelerator}${gfx:+/$gfx})"
 }
 
 build_coder_image() {
@@ -3742,106 +3828,116 @@ cmd_images() {
   load_os_info
   local accelerator="none"
 
-  if [ -z "$NODE_NAME" ] || [ "$NODE_NAME" = "ai01" ]; then
+  if [ -z "$NODE_NAME" ] || [ "$NODE_NAME" = "ai01" ] || [ "$NODE_NAME" = "ai02" ]; then
     accelerator="$(detect_accelerator)"
     validate_accelerator_compatibility "$accelerator"
   fi
 
   cd "$SCRIPT_DIR"
   docker_cmd build --pull --tag "$BASE_IMAGE" -f docker/base/Dockerfile .
-
-  if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then
-    [ -f "${GIGACODE_SUBSCRIPTION_BRIDGE_SOURCE_DIR}/Dockerfile" ] \
-      || die "GigaCode subscription bridge source is missing: ${GIGACODE_SUBSCRIPTION_BRIDGE_SOURCE_DIR}/Dockerfile"
-    [ -f "${GIGACODE_IDENTITY_BROKER_SOURCE_DIR}/Dockerfile" ] \
-      || die "GigaCode identity broker source is missing: ${GIGACODE_IDENTITY_BROKER_SOURCE_DIR}/Dockerfile"
-    [ -f "${OPENCLAW_GIGACODE_ADAPTER_SOURCE_DIR}/Dockerfile" ] \
-      || die "OpenClaw GigaCode adapter source is missing: ${OPENCLAW_GIGACODE_ADAPTER_SOURCE_DIR}/Dockerfile"
-    [ -f "${OPENCLAW_GIGACODE_REQUESTER_PLUGIN_SOURCE_DIR}/openclaw.plugin.json" ] \
-      || die "OpenClaw GigaCode requester plugin source is missing: ${OPENCLAW_GIGACODE_REQUESTER_PLUGIN_SOURCE_DIR}/openclaw.plugin.json"
+  local -a llamacpp_build_args=(--build-arg "BASE_IMAGE=${BASE_IMAGE}")
+  if [ "$accelerator" = "amd" ]; then
+    [ -n "${AMD_ROCM_GFX_VERSION:-}" ] || die "AMD_ROCM_GFX_VERSION is required for the llama.cpp AMD image"
+    llamacpp_build_args+=(--build-arg "AMD_ROCM_RELEASE=${AMD_ROCM_RELEASE}" --build-arg "AMD_ROCM_GFX_VERSION=${AMD_ROCM_GFX_VERSION}")
   fi
+
   if [ "$READONLY_MCP_ENABLED" = "1" ]; then
     require_readonly_mcp_sources
   fi
 
   case "${NODE_NAME:-all}" in
     ai01)
-      local lmstudio_target
-      local lmstudio_image
-      lmstudio_target="$(lmstudio_target_for_accelerator "$accelerator")"
-      lmstudio_image="$(lmstudio_image_for_accelerator "$accelerator")"
-      docker_cmd build --pull --build-arg "BASE_IMAGE=${BASE_IMAGE}" --target "$lmstudio_target" --tag "$lmstudio_image" -f docker/lmstudio/Dockerfile .
-      docker_cmd build --pull --build-arg "BASE_IMAGE=${BASE_IMAGE}" --target lmstudio-proxy --tag "$LMSTUDIO_PROXY_IMAGE" -f docker/lmstudio-proxy/Dockerfile .
-      if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then
-        docker_cmd build --pull --tag "$GIGACODE_SUBSCRIPTION_BRIDGE_IMAGE" -f "${GIGACODE_SUBSCRIPTION_BRIDGE_SOURCE_DIR}/Dockerfile" "$GIGACODE_SUBSCRIPTION_BRIDGE_SOURCE_DIR"
-        docker_cmd build --pull --tag "$GIGACODE_IDENTITY_BROKER_IMAGE" -f "${GIGACODE_IDENTITY_BROKER_SOURCE_DIR}/Dockerfile" "$GIGACODE_IDENTITY_BROKER_SOURCE_DIR"
-      fi
+      local llamacpp_target
+      local llamacpp_image
+      llamacpp_target="$(llamacpp_target_for_accelerator "$accelerator")"
+      llamacpp_image="$(llamacpp_image_for_accelerator "$accelerator")"
+      docker_cmd build "${llamacpp_build_args[@]}" --target "$llamacpp_target" --tag "$llamacpp_image" -f docker/llamacpp/Dockerfile .
+      verify_llamacpp_built_image "$llamacpp_image" "$accelerator"
       build_readonly_mcp_images
-      docker_cmd build --pull --build-arg "BASE_IMAGE=${BASE_IMAGE}" --build-arg "AUTHENTIK_VERSION=${AUTHENTIK_VERSION}" --target authentik --tag "$AUTHENTIK_IMAGE" -f docker/authentik/Dockerfile .
-      docker_cmd build --pull --build-arg "BASE_IMAGE=${BASE_IMAGE}" --target authentik-configurator --tag "$AUTHENTIK_CONFIGURATOR_IMAGE" -f docker/authentik/Dockerfile .
-      docker_cmd build --pull --build-arg "BASE_IMAGE=${BASE_IMAGE}" --tag "$DIAGNOSTIC_IMAGE" -f docker/diagnostic/Dockerfile .
+      docker_cmd build --build-arg "BASE_IMAGE=${BASE_IMAGE}" --build-arg "AUTHENTIK_VERSION=${AUTHENTIK_VERSION}" --target authentik --tag "$AUTHENTIK_IMAGE" -f docker/authentik/Dockerfile .
+      docker_cmd build --build-arg "BASE_IMAGE=${BASE_IMAGE}" --target authentik-configurator --tag "$AUTHENTIK_CONFIGURATOR_IMAGE" -f docker/authentik/Dockerfile .
+      build_gitea_ssh_sync_image
+      build_controller_image
+      build_ssh_key_delivery_image
+      docker_cmd build --build-arg "BASE_IMAGE=${BASE_IMAGE}" --tag "$DIAGNOSTIC_IMAGE" -f docker/diagnostic/Dockerfile .
       docker_cmd pull "$PORTAINER_IMAGE"
       docker_cmd pull "$PORTAINER_AGENT_IMAGE"
+      docker_cmd pull "$DOCKER_SOCKET_PROXY_IMAGE"
       docker_cmd pull "$OPENWEBUI_IMAGE"
       docker_cmd pull "$AUTHENTIK_POSTGRES_IMAGE"
       docker_cmd pull "$AUTHENTIK_REDIS_IMAGE"
-      docker_cmd pull "$METAMCP_IMAGE"
-      docker_cmd pull "$METAMCP_POSTGRES_IMAGE"
       docker_cmd pull "$AGENTGATEWAY_IMAGE"
-      local -a ai01_images=("$BASE_IMAGE" "$lmstudio_image" "$LMSTUDIO_PROXY_IMAGE" "$AUTHENTIK_IMAGE" "$AUTHENTIK_CONFIGURATOR_IMAGE" "$PORTAINER_IMAGE" "$PORTAINER_AGENT_IMAGE" "$OPENWEBUI_IMAGE" "$AUTHENTIK_POSTGRES_IMAGE" "$AUTHENTIK_REDIS_IMAGE" "$DIAGNOSTIC_IMAGE" "$METAMCP_IMAGE" "$METAMCP_POSTGRES_IMAGE" "$AGENTGATEWAY_IMAGE")
-      if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then ai01_images+=("$GIGACODE_SUBSCRIPTION_BRIDGE_IMAGE" "$GIGACODE_IDENTITY_BROKER_IMAGE"); fi
+      if [ "${GITEA_ENABLED:-0}" = "1" ]; then
+        docker_cmd pull "$GITEA_IMAGE"
+        docker_cmd pull "$GITEA_POSTGRES_IMAGE"
+      fi
+      local -a ai01_images=("$BASE_IMAGE" "$llamacpp_image" "$AUTHENTIK_IMAGE" "$AUTHENTIK_CONFIGURATOR_IMAGE" "$PORTAINER_IMAGE" "$PORTAINER_AGENT_IMAGE" "$OPENWEBUI_IMAGE" "$AUTHENTIK_POSTGRES_IMAGE" "$AUTHENTIK_REDIS_IMAGE" "$DIAGNOSTIC_IMAGE" "$AGENTGATEWAY_IMAGE")
       if [ "$READONLY_MCP_ENABLED" = "1" ]; then ai01_images+=("$JIRA_READONLY_MCP_IMAGE" "$CONFLUENCE_READONLY_MCP_IMAGE" "$IMAP_READONLY_MCP_IMAGE"); fi
+      if [ "${GITEA_ENABLED:-0}" = "1" ]; then ai01_images+=("$GITEA_IMAGE" "$GITEA_POSTGRES_IMAGE"); fi
+      if [ "${GITEA_SSH_SYNC_ENABLED:-0}" = "1" ]; then ai01_images+=("$GITEA_SSH_SYNC_IMAGE"); fi
+      if [ "${CONTROLLER_ENABLED:-0}" = "1" ]; then ai01_images+=("$CONTROLLER_IMAGE"); fi
+      if [ "${SSH_KEY_DELIVERY_ENABLED:-0}" = "1" ]; then ai01_images+=("$SSH_KEY_DELIVERY_IMAGE"); fi
       docker_cmd image inspect "${ai01_images[@]}" >/dev/null
       log "Required ai01 images are available for accelerator=${accelerator}"
       ;;
     ai02)
-      docker_cmd build --pull --build-arg "BASE_IMAGE=${BASE_IMAGE}" --build-arg "OPENCLAW_VERSION=${OPENCLAW_VERSION}" --build-arg "DOCKER_CLI_VERSION=${DOCKER_CLI_VERSION}" --target openclaw --tag "$OPENCLAW_IMAGE" -f docker/openclaw/Dockerfile .
-      if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then
-        docker_cmd build --pull --tag "$OPENCLAW_GIGACODE_ADAPTER_IMAGE" -f "${OPENCLAW_GIGACODE_ADAPTER_SOURCE_DIR}/Dockerfile" "$OPENCLAW_GIGACODE_ADAPTER_SOURCE_DIR"
-      fi
-      docker_cmd build --pull --build-arg "BASE_IMAGE=${BASE_IMAGE}" --tag "$DIAGNOSTIC_IMAGE" -f docker/diagnostic/Dockerfile .
+      local llamacpp_target
+      local llamacpp_image
+      llamacpp_target="$(llamacpp_target_for_accelerator "$accelerator")"
+      llamacpp_image="$(llamacpp_image_for_accelerator "$accelerator")"
+      docker_cmd build "${llamacpp_build_args[@]}" --target "$llamacpp_target" --tag "$llamacpp_image" -f docker/llamacpp/Dockerfile .
+      verify_llamacpp_built_image "$llamacpp_image" "$accelerator"
+      build_openclaw_image
+      docker_cmd build --tag openclaw-sandbox:bookworm-slim -f docker/openclaw-sandbox/Dockerfile .
+      docker_cmd build --build-arg "BASE_IMAGE=${BASE_IMAGE}" --tag "$DIAGNOSTIC_IMAGE" -f docker/diagnostic/Dockerfile .
       docker_cmd pull "$PORTAINER_AGENT_IMAGE"
-      docker_cmd pull "$OPENCLAW_SANDBOX_DIND_IMAGE"
+      docker_cmd pull "$DOCKER_SOCKET_PROXY_IMAGE"
       build_coder_image
-      local -a ai02_images=("$BASE_IMAGE" "$OPENCLAW_IMAGE" "$PORTAINER_AGENT_IMAGE" "$DIAGNOSTIC_IMAGE" "$OPENCLAW_SANDBOX_DIND_IMAGE")
-      if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then ai02_images+=("$OPENCLAW_GIGACODE_ADAPTER_IMAGE"); fi
+      if [ "$CODER_ENABLED" = "1" ]; then ensure_coder_workspace_images; fi
+      build_controller_image
+      build_ssh_key_delivery_image
+      local -a ai02_images=("$BASE_IMAGE" "$llamacpp_image" "$OPENCLAW_IMAGE" openclaw-sandbox:bookworm-slim "$PORTAINER_AGENT_IMAGE" "$DOCKER_SOCKET_PROXY_IMAGE" "$DIAGNOSTIC_IMAGE")
       if [ "$CODER_ENABLED" = "1" ]; then
-        ai02_images+=("$CODER_IMAGE" "$CODER_POSTGRES_IMAGE")
+        ai02_images+=("$CODER_IMAGE" "$CODER_POSTGRES_IMAGE" "$CODER_CSHARP_WORKSPACE_IMAGE" "$CODER_PYTHON_WORKSPACE_IMAGE")
       fi
+      if [ "${CONTROLLER_ENABLED:-0}" = "1" ]; then ai02_images+=("$CONTROLLER_IMAGE"); fi
+      if [ "${SSH_KEY_DELIVERY_ENABLED:-0}" = "1" ]; then ai02_images+=("$SSH_KEY_DELIVERY_IMAGE"); fi
       docker_cmd image inspect "${ai02_images[@]}" >/dev/null
       log "Required ai02 images are available"
       ;;
     all)
-      local lmstudio_target
-      local lmstudio_image
-      lmstudio_target="$(lmstudio_target_for_accelerator "$accelerator")"
-      lmstudio_image="$(lmstudio_image_for_accelerator "$accelerator")"
-      docker_cmd build --pull --build-arg "BASE_IMAGE=${BASE_IMAGE}" --target "$lmstudio_target" --tag "$lmstudio_image" -f docker/lmstudio/Dockerfile .
-      docker_cmd build --pull --build-arg "BASE_IMAGE=${BASE_IMAGE}" --target lmstudio-proxy --tag "$LMSTUDIO_PROXY_IMAGE" -f docker/lmstudio-proxy/Dockerfile .
-      if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then
-        docker_cmd build --pull --tag "$GIGACODE_SUBSCRIPTION_BRIDGE_IMAGE" -f "${GIGACODE_SUBSCRIPTION_BRIDGE_SOURCE_DIR}/Dockerfile" "$GIGACODE_SUBSCRIPTION_BRIDGE_SOURCE_DIR"
-        docker_cmd build --pull --tag "$GIGACODE_IDENTITY_BROKER_IMAGE" -f "${GIGACODE_IDENTITY_BROKER_SOURCE_DIR}/Dockerfile" "$GIGACODE_IDENTITY_BROKER_SOURCE_DIR"
-      fi
+      local llamacpp_target
+      local llamacpp_image
+      llamacpp_target="$(llamacpp_target_for_accelerator "$accelerator")"
+      llamacpp_image="$(llamacpp_image_for_accelerator "$accelerator")"
+      docker_cmd build "${llamacpp_build_args[@]}" --target "$llamacpp_target" --tag "$llamacpp_image" -f docker/llamacpp/Dockerfile .
+      verify_llamacpp_built_image "$llamacpp_image" "$accelerator"
       build_readonly_mcp_images
-      docker_cmd build --pull --build-arg "BASE_IMAGE=${BASE_IMAGE}" --build-arg "OPENCLAW_VERSION=${OPENCLAW_VERSION}" --build-arg "DOCKER_CLI_VERSION=${DOCKER_CLI_VERSION}" --target openclaw --tag "$OPENCLAW_IMAGE" -f docker/openclaw/Dockerfile .
-      if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then
-        docker_cmd build --pull --tag "$OPENCLAW_GIGACODE_ADAPTER_IMAGE" -f "${OPENCLAW_GIGACODE_ADAPTER_SOURCE_DIR}/Dockerfile" "$OPENCLAW_GIGACODE_ADAPTER_SOURCE_DIR"
-      fi
+      build_openclaw_image
+      docker_cmd build --tag openclaw-sandbox:bookworm-slim -f docker/openclaw-sandbox/Dockerfile .
       docker_cmd build --pull --build-arg "BASE_IMAGE=${BASE_IMAGE}" --build-arg "AUTHENTIK_VERSION=${AUTHENTIK_VERSION}" --target authentik --tag "$AUTHENTIK_IMAGE" -f docker/authentik/Dockerfile .
       docker_cmd build --pull --build-arg "BASE_IMAGE=${BASE_IMAGE}" --target authentik-configurator --tag "$AUTHENTIK_CONFIGURATOR_IMAGE" -f docker/authentik/Dockerfile .
+      build_gitea_ssh_sync_image
+      build_controller_image
+      build_ssh_key_delivery_image
       docker_cmd build --pull --build-arg "BASE_IMAGE=${BASE_IMAGE}" --tag "$DIAGNOSTIC_IMAGE" -f docker/diagnostic/Dockerfile .
       docker_cmd pull "$PORTAINER_IMAGE"
       docker_cmd pull "$PORTAINER_AGENT_IMAGE"
+      docker_cmd pull "$DOCKER_SOCKET_PROXY_IMAGE"
       docker_cmd pull "$OPENWEBUI_IMAGE"
       docker_cmd pull "$AUTHENTIK_POSTGRES_IMAGE"
       docker_cmd pull "$AUTHENTIK_REDIS_IMAGE"
-      docker_cmd pull "$METAMCP_IMAGE"
-      docker_cmd pull "$METAMCP_POSTGRES_IMAGE"
       docker_cmd pull "$AGENTGATEWAY_IMAGE"
-      local -a all_images=("$BASE_IMAGE" "$lmstudio_image" "$LMSTUDIO_PROXY_IMAGE" "$OPENCLAW_IMAGE" "$AUTHENTIK_IMAGE" "$AUTHENTIK_CONFIGURATOR_IMAGE" "$PORTAINER_IMAGE" "$PORTAINER_AGENT_IMAGE" "$OPENWEBUI_IMAGE" "$AUTHENTIK_POSTGRES_IMAGE" "$AUTHENTIK_REDIS_IMAGE" "$DIAGNOSTIC_IMAGE" "$METAMCP_IMAGE" "$METAMCP_POSTGRES_IMAGE" "$AGENTGATEWAY_IMAGE")
-      if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then all_images+=("$GIGACODE_SUBSCRIPTION_BRIDGE_IMAGE" "$GIGACODE_IDENTITY_BROKER_IMAGE"); fi
-      if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then all_images+=("$OPENCLAW_GIGACODE_ADAPTER_IMAGE"); fi
+      if [ "${GITEA_ENABLED:-0}" = "1" ]; then
+        docker_cmd pull "$GITEA_IMAGE"
+        docker_cmd pull "$GITEA_POSTGRES_IMAGE"
+      fi
+      local -a all_images=("$BASE_IMAGE" "$llamacpp_image" "$OPENCLAW_IMAGE" openclaw-sandbox:bookworm-slim "$AUTHENTIK_IMAGE" "$AUTHENTIK_CONFIGURATOR_IMAGE" "$PORTAINER_IMAGE" "$PORTAINER_AGENT_IMAGE" "$DOCKER_SOCKET_PROXY_IMAGE" "$OPENWEBUI_IMAGE" "$AUTHENTIK_POSTGRES_IMAGE" "$AUTHENTIK_REDIS_IMAGE" "$DIAGNOSTIC_IMAGE" "$AGENTGATEWAY_IMAGE")
       if [ "$READONLY_MCP_ENABLED" = "1" ]; then all_images+=("$JIRA_READONLY_MCP_IMAGE" "$CONFLUENCE_READONLY_MCP_IMAGE" "$IMAP_READONLY_MCP_IMAGE"); fi
+      if [ "${GITEA_ENABLED:-0}" = "1" ]; then all_images+=("$GITEA_IMAGE" "$GITEA_POSTGRES_IMAGE"); fi
+      if [ "${GITEA_SSH_SYNC_ENABLED:-0}" = "1" ]; then all_images+=("$GITEA_SSH_SYNC_IMAGE"); fi
+      if [ "${CONTROLLER_ENABLED:-0}" = "1" ]; then all_images+=("$CONTROLLER_IMAGE"); fi
+      if [ "${SSH_KEY_DELIVERY_ENABLED:-0}" = "1" ]; then all_images+=("$SSH_KEY_DELIVERY_IMAGE"); fi
       docker_cmd image inspect "${all_images[@]}" >/dev/null
       log "Required images are available for accelerator=${accelerator}"
       ;;
@@ -3912,6 +4008,54 @@ update_service_env() {
   fi
 }
 
+# Signing keys of the ai-stand-llm Authentik provider (the JWTs people mint from
+# an App password, see agentgateway/config.yaml llm.policies.jwtAuth). Public
+# key material only, so it travels in the service environment as an inline
+# JWKS: agentgateway then neither needs Authentik to be up when it starts nor a
+# provider that does not exist yet on a fresh install. The loopback port is the
+# published Authentik server (closed to every other source by firewalld).
+# Prints the normalised JWKS (sorted keys, compact, one line) or fails.
+authentik_llm_jwks() {
+  local raw
+  raw="$(curl --fail --silent --show-error --max-time 20 \
+    "http://127.0.0.1:19001/application/o/ai-stand-llm/jwks/")" || return 1
+  printf '%s' "$raw" | jq -e -S -c '
+    select((.keys | type == "array") and (.keys | length > 0)
+      and all(.keys[]; (.kty | type == "string") and (.kid | type == "string")))
+    | {keys: (.keys | sort_by(.kid))}' 2>/dev/null
+}
+
+# soft: on a fresh install the provider does not exist until configure-authentik
+# has run, so a missing JWKS is only reported (the empty compose placeholder
+# denies every JWT and keeps the service keys working). hard: used right after
+# configure-authentik, where the provider must exist.
+sync_agentgateway_llm_jwks() {
+  local mode="${1:-soft}" jwks
+  [ "$NODE_NAME" = "ai01" ] || return 0
+  if ! jwks="$(authentik_llm_jwks)"; then
+    if [ "$mode" = "hard" ]; then
+      die "Authentik did not return signing keys for the ai-stand-llm provider; check configure-authentik output"
+    fi
+    warn "ai-stand-llm signing keys are not available yet; LLM JWT access stays closed until configure-authentik has run"
+    return 0
+  fi
+  case "$jwks" in
+    *"'"*) die "ai-stand-llm JWKS contains a single quote, which agentgateway/config.yaml cannot embed" ;;
+  esac
+  update_service_env agentgateway "LLM_AUTHENTIK_JWKS=${jwks}"
+}
+
+check_agentgateway_llm_jwks() {
+  [ "$NODE_NAME" = "ai01" ] || return 0
+  local live desired
+  live="$(service_env_value "${STACK_NAME}_agentgateway" LLM_AUTHENTIK_JWKS)"
+  desired="$(authentik_llm_jwks)" \
+    || die "Authentik does not serve signing keys for the ai-stand-llm provider (run configure-authentik)"
+  [ "$live" = "$desired" ] \
+    || die "Agentgateway LLM_AUTHENTIK_JWKS differs from the keys Authentik serves for ai-stand-llm; run configure-authentik"
+  log "Agentgateway LLM JWT keys match Authentik (ai-stand-llm)"
+}
+
 apply_installation_service_env() {
   update_service_env authentik-server \
     "AUTHENTIK_HOST_BROWSER=https://${AUTHENTIK_HOST}" \
@@ -3933,6 +4077,7 @@ apply_installation_service_env() {
     "AGENTGATEWAY_OIDC_REDIRECT_URI=https://${AGENTGATEWAY_HOST}/oauth/callback" \
     "MCP_AUTHENTIK_ISSUER_URL=https://${AUTHENTIK_HOST}/application/o/agentgateway-mcp/" \
     "MCP_AUTHENTIK_CLIENT_ID=agentgateway-mcp" \
+    "LLM_AUTHENTIK_ISSUER_URL=https://${AUTHENTIK_HOST}/application/o/ai-stand-llm/" \
     "AUTHENTIK_AGENTGATEWAY_CLIENT_SECRET=${AUTHENTIK_AGENTGATEWAY_CLIENT_SECRET}" \
     "AGENTGATEWAY_OPENWEBUI_TOKEN=${AGENTGATEWAY_OPENWEBUI_TOKEN}" \
     "AGENTGATEWAY_OPENCLAW_TOKEN=${AGENTGATEWAY_OPENCLAW_TOKEN}" \
@@ -3957,27 +4102,14 @@ apply_installation_service_env() {
   # Compose overlay. Do not patch them after stack deploy: Swarm's service
   # environment merge can otherwise replace those profile values with the
   # generic placeholders from compose.coder.yaml.
-  update_service_env lmstudio \
+  update_service_env llamacpp01 \
     "IM_TZ=${IM_TZ}" \
     "IM_UID=${IM_UID}" \
     "IM_GID=${IM_GID}"
-  update_service_env lmstudio-proxy \
+  update_service_env llamacpp02 \
     "IM_TZ=${IM_TZ}" \
     "IM_UID=${IM_UID}" \
-    "IM_GID=${IM_GID}" \
-    "LMSTUDIO_PROXY_STRIP_TOOLS_AFTER_RESULT_ENABLED=${LMSTUDIO_PROXY_STRIP_TOOLS_AFTER_RESULT_ENABLED}" \
-    "LMSTUDIO_PROXY_FLATTEN_TOOL_RESULT_CONTENT_ENABLED=${LMSTUDIO_PROXY_FLATTEN_TOOL_RESULT_CONTENT_ENABLED}"
-  update_service_env metamcp \
-    "APP_URL=https://${METAMCP_HOST}" \
-    "NEXT_PUBLIC_APP_URL=https://${METAMCP_HOST}" \
-    "POSTGRES_PASSWORD=${METAMCP_POSTGRES_PASSWORD}" \
-    "DATABASE_URL=postgresql://metamcp:${METAMCP_POSTGRES_PASSWORD}@metamcp-postgres:5432/metamcp" \
-    "BETTER_AUTH_SECRET=${METAMCP_BETTER_AUTH_SECRET}" \
-    "BOOTSTRAP_USER_EMAIL=${METAMCP_BOOTSTRAP_EMAIL}" \
-    "BOOTSTRAP_USER_PASSWORD=${METAMCP_BOOTSTRAP_PASSWORD}" \
-    "OIDC_CLIENT_SECRET=${AUTHENTIK_METAMCP_CLIENT_SECRET}" \
-    "OIDC_DISCOVERY_URL=https://${AUTHENTIK_HOST}/application/o/metamcp/.well-known/openid-configuration" \
-    "OIDC_AUTHORIZATION_URL=https://${AUTHENTIK_HOST}/application/o/authorize/"
+    "IM_GID=${IM_GID}"
 }
 
 reconcile_coder_profile_urls() {
@@ -4000,18 +4132,6 @@ reconcile_coder_profile_urls() {
   # it. Nothing here can turn the claim itself true without a custom scope
   # mapping shared by every other OIDC app; this Coder-only escape hatch is
   # the narrower fix.
-  #
-  # TF_VAR_agentgateway_token: Terraform's own env-var convention (any
-  # TF_VAR_<name> in the process environment populates var.<name>) - Coder's
-  # built-in provisioner execs `terraform` as a subprocess of this exact
-  # container's own process, inheriting its environment, so the ai-stand-dev
-  # template's variable "agentgateway_token" (docker/coder-templates/
-  # ai-stand-dev/main.tf) needs no file, no coder_parameter prompt, and no
-  # per-workspace secret of its own. Same reasoning as every other credential
-  # in this function being reconciled here post-deploy rather than baked
-  # into compose.coder.yaml: a rotated AGENTGATEWAY_CODER_TOKEN (see
-  # ensure_ai_stand_secrets) takes effect on the next workspace
-  # build/restart, with no template republish.
   local svc="${STACK_NAME}_coder"
   docker_cmd service inspect "$svc" >/dev/null 2>&1 \
     || die "Missing Coder service after stack deploy: ${svc}"
@@ -4028,112 +4148,296 @@ reconcile_coder_profile_urls() {
     --env-add "CODER_OIDC_SCOPES=openid,profile,email,groups,offline_access" \
     --env-add "CODER_OIDC_GROUP_FIELD=groups" \
     --env-add "CODER_OIDC_ALLOWED_GROUPS=ai-users,ai-admins" \
+    # Role sync (USER_ROLE_*) is a licensed Coder feature: on this Free deployment it is
+    # inert, and a signed-in user is a plain member. ALLOWED_GROUPS is the active gate.
     --env-add "CODER_OIDC_USER_ROLE_FIELD=groups" \
     --env-add 'CODER_OIDC_USER_ROLE_MAPPING={"ai-users":["member"],"ai-admins":["owner"]}' \
-    --env-add "TF_VAR_agentgateway_token=${AGENTGATEWAY_CODER_TOKEN}" \
     "$svc" >/dev/null
   log "Reconciled Coder native OIDC and public URLs"
 }
 
-# MetaMCP's own BOOTSTRAP_USER_* env vars (set above by
-# apply_installation_service_env) are documented but did not actually
-# create a user in testing (2026-09-05, v2.4.22 - confirmed via
-# BOOTSTRAP_DEBUG=true producing zero bootstrap-related log output and an
-# empty `users` table). Provision the admin account directly via Better
-# Auth's sign-up endpoint instead. This is idempotent in practice: signing
-# up an already-registered email returns 422
-# USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL, treated as success below.
-ensure_metamcp_bootstrap_user() {
-  wait_service_ready "${STACK_NAME}_metamcp"
+load_llamacpp_catalog_selection() {
+  local accelerator="${1:-${ACCELERATOR:-amd}}"
+  local helper="${SCRIPT_DIR}/model-catalog/selection.py"
+  [ -r "$helper" ] || die "Pinned llama.cpp model selector is missing"
+  local selected policy_max_context="${LLAMACPP_CHAT_POLICY_MAX_CONTEXT:-${LLAMACPP_CHAT_CONTEXT_LENGTH:-8192}}"
+  selected="$(run_root python3 "$helper" \
+    --catalog "${SCRIPT_DIR}/model-catalog/catalog.lock.json" \
+    --chat-model "${LLAMACPP_CHAT_MODEL_ID:-$LLAMACPP_MODEL_IDENTIFIER}" \
+    --embedding-model "${LLAMACPP_EMBEDDING_MODEL_ID:-$LLAMACPP_EMBEDDING_MODEL_IDENTIFIER}" \
+    --chat-context "${LLAMACPP_CHAT_CONTEXT_LENGTH:-8192}" \
+    --chat-policy-max-context "$policy_max_context" \
+    --embedding-context "${LLAMACPP_EMBEDDING_CONTEXT_LENGTH:-8192}" \
+    --chat-gfx "${AI01_ROCM_GFX_VERSION:-none}" \
+    --embedding-gfx "${AI02_ROCM_GFX_VERSION:-none}" \
+    --accelerator "$accelerator" \
+    --image-version "$LLAMACPP_IMAGE_VERSION" --format shell)" \
+    || die "Pinned Q4/projector model selection is invalid"
+  # The checked repository helper emits only quoted, managed export records.
+  eval "$selected"
+  LLAMACPP_CHAT_MODEL_SOURCE="${LLAMACPP_CHAT_MODEL_ID}@q4_k_m"
+  if docker_cmd service inspect "${STACK_NAME}_openclaw-gateway" >/dev/null 2>&1; then
+    local current_db current_tokens current_codex_profile
+    current_db="$(service_env_value "${STACK_NAME}_openclaw-gateway" OPENCLAW_LANCEDB_DB_PATH)"
+    if [[ "$current_db" =~ ^/home/ai/\.openclaw/memory/lancedb-[a-f0-9]{16}$ ]]; then
+      OPENCLAW_LANCEDB_DB_PATH="$current_db"
+    fi
+    current_tokens="$(service_env_value "${STACK_NAME}_openclaw-gateway" OPENCLAW_MAX_TOKENS)"
+    if [[ "$current_tokens" =~ ^[1-9][0-9]*$ ]]; then OPENCLAW_MAX_TOKENS="$current_tokens"; fi
+    current_codex_profile="$(service_env_value "${STACK_NAME}_openclaw-gateway" OPENCLAW_CODEX_EXECUTION_PROFILE)"
+    case "$current_codex_profile" in guardian|autonomous) OPENCLAW_CODEX_EXECUTION_PROFILE="$current_codex_profile" ;; esac
+  fi
+  local context_file="${LLAMACPP01_DATA}/state/.ai-stand/${INSTALLATION}/context.env"
+  if run_root test -f "$context_file"; then
+    # No sourcing of writable host data: check root-owned private state and
+    # its generation before using the tested context and immutable images.
+    local approved
+    approved="$(run_root python3 - "$context_file" "$LLAMACPP_MODEL_CATALOG_FINGERPRINT" <<'PY'
+from pathlib import Path
+import re
+import stat
+import sys
 
-  docker_cmd network inspect "${STACK_NAME}_ai-core" >/dev/null \
-    || die "Missing overlay network ${STACK_NAME}_ai-core; run apply.sh deploy first"
-
-  # The password goes through -e VARNAME (no literal value) rather than
-  # --env VARNAME=value, so it never appears in this process's own argv -
-  # same pattern as cmd_configure_authentik(). The retry loop (inside the
-  # one-off container, not just around it) absorbs the gap between Swarm
-  # reporting the task "Running" and the app inside actually accepting
-  # connections on the overlay network.
-  (
-    local -x METAMCP_BOOTSTRAP_PASSWORD="$METAMCP_BOOTSTRAP_PASSWORD"
-    local status
-    status="$(
-      docker_cmd run \
-        --rm \
-        --pull never \
-        --network "${STACK_NAME}_ai-core" \
-        --env "METAMCP_BOOTSTRAP_EMAIL=${METAMCP_BOOTSTRAP_EMAIL}" \
-        -e METAMCP_BOOTSTRAP_PASSWORD \
-        --entrypoint sh \
-        "$DIAGNOSTIC_IMAGE" \
-        -c '
-          body="$(jq -n --arg email "$METAMCP_BOOTSTRAP_EMAIL" --arg password "$METAMCP_BOOTSTRAP_PASSWORD" --arg name admin \
-            "{email:\$email,password:\$password,name:\$name}")"
-          status="000"
-          # MetaMCP runs backend (auth routes) then frontend (the port
-          # clients actually hit, which proxies /api/auth/* to the backend)
-          # as two sequential processes after migrations - cold start can
-          # take well over a minute under load, so this needs a real
-          # deadline, not a handful of quick retries.
-          deadline=$(($(date +%s) + 300))
-          while [ "$(date +%s)" -lt "$deadline" ]; do
-            status="$(
-              curl --silent --max-time 15 \
-                --output /dev/null --write-out "%{http_code}" \
-                -X POST http://metamcp:12008/api/auth/sign-up/email \
-                -H "Content-Type: application/json" \
-                --data "$body" 2>/dev/null
-            )" || status="000"
-            case "$status" in
-              200|422) break ;;
-            esac
-            sleep 5
-          done
-          printf "%s" "$status"
-        '
-    )" || true
-
-    case "$status" in
-      200|422) log "MetaMCP bootstrap admin ensured (${METAMCP_BOOTSTRAP_EMAIL}, HTTP ${status})" ;;
-      *) die "MetaMCP bootstrap admin sign-up failed: HTTP ${status:-none}" ;;
-    esac
-  )
+p = Path(sys.argv[1])
+for target, mode, kind in ((p.parent, 0o700, stat.S_ISDIR), (p, 0o600, stat.S_ISREG)):
+    s = target.lstat()
+    if s.st_uid != 0 or not kind(s.st_mode) or stat.S_IMODE(s.st_mode) != mode:
+        raise SystemExit("Model context state must be private and root-owned")
+values = {}
+for line in p.read_text(encoding="utf-8").splitlines():
+    if "=" in line:
+        key, value = line.split("=", 1)
+        if key in values:
+            raise SystemExit("Duplicate model context state field")
+        values[key] = value
+if values.get("MODEL_FINGERPRINT") == sys.argv[2]:
+    context = values.get("CHAT_CONTEXT_LENGTH", "")
+    chat, embedding = values.get("CHAT_IMAGE_ID", ""), values.get("EMBEDDING_IMAGE_ID", "")
+    if not re.fullmatch(r"[1-9][0-9]*", context) or not all(re.fullmatch(r"sha256:[a-f0-9]{64}", v) for v in (chat, embedding)):
+        raise SystemExit("Model context state lacks approved image/context proof")
+    tokens = values.get("OPENCLAW_MAX_TOKENS", "")
+    if tokens and (not re.fullmatch(r"[1-9][0-9]*", tokens) or int(tokens) > int(context)):
+        raise SystemExit("Invalid model response token state")
+    print(context, chat, embedding, tokens)
+PY
+    )" || die "Invalid model context state"
+    if [ -n "$approved" ]; then
+      local approved_tokens
+      read -r LLAMACPP_CHAT_CONTEXT_LENGTH LLAMACPP01_APPROVED_IMAGE LLAMACPP02_APPROVED_IMAGE approved_tokens <<<"$approved"
+      if [ -n "$approved_tokens" ]; then OPENCLAW_MAX_TOKENS="$approved_tokens"; fi
+    fi
+  fi
+  export LLAMACPP_CHAT_MODEL_SOURCE LLAMACPP_CHAT_MODEL_ID LLAMACPP_CHAT_MODEL_PATH LLAMACPP_CHAT_MODEL_SHA256 \
+    LLAMACPP_CHAT_CONTEXT_LENGTH LLAMACPP_CHAT_PROJECTOR_PATH LLAMACPP_CHAT_PROJECTOR_SHA256 \
+    LLAMACPP_EMBEDDING_MODEL_ID LLAMACPP_EMBEDDING_MODEL_PATH LLAMACPP_EMBEDDING_MODEL_SHA256 \
+    LLAMACPP_EMBEDDING_CONTEXT_LENGTH LLAMACPP_EMBEDDING_DIMENSIONS LLAMACPP_MODEL_CATALOG_FINGERPRINT \
+    LLAMACPP01_APPROVED_IMAGE LLAMACPP02_APPROVED_IMAGE OPENCLAW_LANCEDB_DB_PATH OPENCLAW_MAX_TOKENS OPENCLAW_CODEX_EXECUTION_PROFILE
 }
 
-configure_metamcp_personal_facades() {
-  [ "$READONLY_MCP_ENABLED" = "1" ] || {
-    log "MetaMCP personal facade provisioning skipped; READONLY_MCP_ENABLED=0"
-    return 0
-  }
-  # Personal MetaMCP resources are now identity-driven, rather than sourced
-  # from the retired static inventory. The root-owned reconciler invokes the
-  # pinned provisioner only after it has observed a completed OIDC login.
-  # Doing it here during every full deploy would race that login and could
-  # accidentally make a deployment depend on one user's personal state.
-  log "MetaMCP personal facade provisioning is owned by the read-only MCP reconciler"
+export_model_images() {
+  local accelerator="$1" approved
+  case "$accelerator" in
+    cpu) LLAMACPP01_RUNTIME_IMAGE="$LLAMACPP_CPU_IMAGE"; LLAMACPP02_RUNTIME_IMAGE="$LLAMACPP_CPU_IMAGE" ;;
+    nvidia) LLAMACPP01_RUNTIME_IMAGE="$LLAMACPP_NVIDIA_IMAGE"; LLAMACPP02_RUNTIME_IMAGE="$LLAMACPP_NVIDIA_IMAGE" ;;
+    amd) LLAMACPP01_RUNTIME_IMAGE="$LLAMACPP01_AMD_IMAGE"; LLAMACPP02_RUNTIME_IMAGE="$LLAMACPP02_AMD_IMAGE" ;;
+    *) die "Unsupported model accelerator: $accelerator" ;;
+  esac
+  for approved in "${LLAMACPP01_APPROVED_IMAGE:-}" "${LLAMACPP02_APPROVED_IMAGE:-}"; do
+    [ -z "$approved" ] || [[ "$approved" =~ ^sha256:[a-f0-9]{64}$ ]] || die "Approved model image must be an immutable local ID"
+  done
+  LLAMACPP01_RUNTIME_IMAGE="${LLAMACPP01_APPROVED_IMAGE:-$LLAMACPP01_RUNTIME_IMAGE}"
+  LLAMACPP02_RUNTIME_IMAGE="${LLAMACPP02_APPROVED_IMAGE:-$LLAMACPP02_RUNTIME_IMAGE}"
+  export LLAMACPP_CPU_IMAGE LLAMACPP01_AMD_IMAGE LLAMACPP02_AMD_IMAGE LLAMACPP_NVIDIA_IMAGE \
+    LLAMACPP01_RUNTIME_IMAGE LLAMACPP02_RUNTIME_IMAGE AI01_ROCM_GFX_VERSION AI02_ROCM_GFX_VERSION
 }
 
-cmd_migrate_metamcp_tenants() {
+ensure_llamacpp_runtime_groups() {
+  local name service current group changed args
+  for name in llamacpp01 llamacpp02; do
+    service="${STACK_NAME}_${name}"
+    [ "$(docker_cmd service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.User}}' "$service")" = '10000:20000' ] \
+      || die "Native model service must run as 10000:20000: $name"
+    current="$(docker_cmd service inspect --format '{{json .Spec.TaskTemplate.ContainerSpec.Groups}}' "$service")"
+    local -a args=(--detach=true)
+    changed=false
+    # Docker's Swarm API supports supplementary groups even though its
+    # legacy v3 Compose schema rejects group_add. Match the tested process
+    # identity without retaining root or granting runtime capabilities.
+    while IFS= read -r group; do
+      case "$group" in 44|993|'') ;; *) args+=(--group-rm "$group"); changed=true ;; esac
+    done < <(printf '%s' "$current" | jq -r '. // [] | .[]')
+    for group in 44 993; do
+      if ! printf '%s' "$current" | jq -e --arg value "$group" '(. // []) | index($value) != null' >/dev/null; then
+        args+=(--group-add "$group"); changed=true
+      fi
+    done
+    if [ "$changed" = true ]; then docker_cmd service update "${args[@]}" "$service" >/dev/null; fi
+  done
+}
+
+# Create/update only the four model services. This stage cannot restart any
+# consumer, replace Agentgateway's profile, access Secrets or prune services.
+cmd_deploy_models() (
   load_os_info
-  [ "$NODE_NAME" = "ai01" ] || die "migrate-metamcp-tenants must run on ai01"
-  [ "$READONLY_MCP_ENABLED" = "1" ] \
-    || die "migrate-metamcp-tenants requires READONLY_MCP_ENABLED=1"
-  require_readonly_mcp_sources
-  run_root test -f "$METAMCP_TENANT_IDENTITY_INVENTORY" \
-    || die "MetaMCP tenant identity inventory is missing: $METAMCP_TENANT_IDENTITY_INVENTORY"
-  [ "$(run_root stat -c '%U:%G:%a' "$METAMCP_TENANT_IDENTITY_INVENTORY")" = "root:root:600" ] \
-    || die "MetaMCP tenant identity inventory must be root:root mode 0600"
+  local accelerator="${ACCELERATOR}"
+  if [ "$accelerator" = auto ]; then accelerator="$(detect_accelerator)"; fi
+  validate_accelerator_compatibility "$accelerator"
+  load_llamacpp_catalog_selection "$accelerator"
+  export_model_images "$accelerator"
+  local temp_dir
+  temp_dir="$(mktemp -d /tmp/ai-stand-models.XXXXXX)"
+  trap 'rm -f -- "$temp_dir/all.json" "$temp_dir/models.json"; rmdir -- "$temp_dir"' EXIT
+  local -a compose_args=(-f "$COMPOSE_FILE")
+  case "$accelerator" in
+    amd) compose_args+=(-f "$COMPOSE_AMD_FILE") ;;
+    nvidia) compose_args+=(-f "$COMPOSE_NVIDIA_FILE") ;;
+  esac
+  # Parse the baseline without installation/control-plane overlays. They
+  # are irrelevant to model boot and may reference not-yet-created Secrets.
+  export AUTHENTIK_IMAGE AUTHENTIK_POSTGRES_IMAGE AUTHENTIK_REDIS_IMAGE \
+    OPENCLAW_IMAGE OPENWEBUI_IMAGE PORTAINER_IMAGE PORTAINER_AGENT_IMAGE \
+    AGENTGATEWAY_IMAGE AGENTGATEWAY_POSTGRES_IMAGE DOCKER_SOCKET_PROXY_IMAGE
+  docker_cmd compose --project-name "$STACK_NAME" "${compose_args[@]}" config --format json >"$temp_dir/all.json"
+  python3 - "$temp_dir/all.json" "$temp_dir/models.json" <<'PY'
+import json
+from pathlib import Path
+import sys
 
-  # A human reviews this inventory once. The helper then creates the
-  # immutable relation atomically; later reconciliations never use email to
-  # select a tenant again.
-  run_root python3 "${METAMCP_TENANT_CONTROL_SOURCE_DIR}/provision.py" \
-    --migrate-email-owners \
-    --inventory "$METAMCP_TENANT_IDENTITY_INVENTORY" \
-    --stack-name "$STACK_NAME" \
-    --metamcp-image "$METAMCP_IMAGE"
-  log "MetaMCP tenant ownership migration completed"
+source = json.loads(Path(sys.argv[1]).read_text())
+names = ("llamacpp01", "llamacpp02")
+services = {name: source["services"][name] for name in names}
+for service in services.values():
+    # Compose's canonical JSON uses null for image-default command/entrypoint;
+    # the legacy Swarm Compose parser expects those keys to be absent.
+    for key in ("command", "entrypoint"):
+        if service.get(key) is None:
+            service.pop(key, None)
+    for mount in service.get("volumes", []):
+        if mount.get("type") == "tmpfs":
+            # Compose canonical JSON emits the byte size as a decimal string;
+            # the legacy Swarm parser requires a numeric long-mount value.
+            for key in ("size", "mode"):
+                if key in mount.get("tmpfs", {}):
+                    mount["tmpfs"][key] = int(mount["tmpfs"][key])
+    if service.get("ports") or service.get("secrets") or service.get("configs"):
+        raise SystemExit("Model deployment must not publish ports or import control-plane Secrets")
+    if set(service.get("networks", {})) != {"ai-models-backend"}:
+        raise SystemExit("Unexpected model service network")
+network = dict(source["networks"]["ai-models-backend"])
+network.pop("name", None)
+if network.get("driver") != "overlay" or network.get("attachable", False) is not False:
+    raise SystemExit("Model backend network must remain a closed overlay")
+Path(sys.argv[2]).write_text(json.dumps({"version": "3.8", "services": services, "networks": {"ai-models-backend": network}}))
+PY
+  docker_cmd stack config -c "$temp_dir/models.json" >/dev/null
+  docker_cmd stack deploy --resolve-image never -c "$temp_dir/models.json" "$STACK_NAME"
+  ensure_llamacpp_runtime_groups
+  log "Only native model servers submitted for deployment"
+)
+
+require_completed_model_migration_before_deploy() {
+  [ "$MODEL_MIGRATION_REQUIRED" = "1" ] || return 0
+  [[ "${LLAMACPP01_APPROVED_IMAGE:-}" =~ ^sha256:[a-f0-9]{64}$ ]] \
+    && [[ "${LLAMACPP02_APPROVED_IMAGE:-}" =~ ^sha256:[a-f0-9]{64}$ ]] \
+    || die "A full deployment of ${INSTALLATION} requires the immutable image IDs from matching tested context state"
+  # Both verified fresh storage and an existing index require the migration
+  # controller's matching completion receipt. Absent services are not proof
+  # that persistent data is empty.
+  local state_file="${AI_STAND_DATA_ROOT}/model-migration/${INSTALLATION}/state.json"
+  if ! run_root python3 - "$state_file" "$LLAMACPP_MODEL_CATALOG_FINGERPRINT" "$LLAMACPP_EMBEDDING_MODEL_ID" "$LLAMACPP_EMBEDDING_DIMENSIONS" <<'PY'
+import json
+from pathlib import Path
+import re
+import stat
+import sys
+
+try:
+    path, generation = Path(sys.argv[1]), sys.argv[2]
+    if not re.fullmatch(r'[a-f0-9]{64}', generation):
+        sys.exit(1)
+    directory, metadata = path.parent.lstat(), path.lstat()
+    if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0 or stat.S_IMODE(directory.st_mode) != 0o700:
+        sys.exit(1)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600:
+        sys.exit(1)
+    state = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(state, dict) or state.get('phase') != 'complete' or state.get('generation') != generation \
+            or state.get('model') != sys.argv[3] or type(state.get('dimensions')) is not int \
+            or state['dimensions'] != int(sys.argv[4]):
+        sys.exit(1)
+except (OSError, ValueError, TypeError):
+    sys.exit(1)
+PY
+  then
+    die "${INSTALLATION} requires a completed matching ${LLAMACPP_EMBEDDING_MODEL_ID}/${LLAMACPP_EMBEDDING_DIMENSIONS} migration or verified fresh-storage receipt; run model-migrate-q4 with passed canaries first. No deployment services were changed"
+  fi
+  # The first replacement Gateway must point at the completed generation and
+  # its memory slot, not briefly reactivate an archived/default index.
+  OPENCLAW_LANCEDB_ENABLED=1
+  OPENCLAW_LANCEDB_DB_PATH="/home/ai/.openclaw/memory/lancedb-${LLAMACPP_MODEL_CATALOG_FINGERPRINT:0:16}"
+  export OPENCLAW_LANCEDB_ENABLED OPENCLAW_LANCEDB_DB_PATH
+}
+
+cmd_configure_model_routing() {
+  [ "$NODE_NAME" = ai01 ] || die "Model routing must be configured on the Agentgateway node ai01"
+  local accelerator="$ACCELERATOR"
+  if [ "$accelerator" = auto ]; then accelerator="$(detect_accelerator)"; fi
+  load_llamacpp_catalog_selection "$accelerator"
+  [[ "${LLAMACPP01_APPROVED_IMAGE:-}" =~ ^sha256:[a-f0-9]{64}$ ]] \
+    && [[ "${LLAMACPP02_APPROVED_IMAGE:-}" =~ ^sha256:[a-f0-9]{64}$ ]] \
+    || die "Model routing requires approved immutable images and tested context state"
+  local gateway_service="${STACK_NAME}_agentgateway" service replicas secret source="$AGENTGATEWAY_CONFIG_SOURCE"
+  docker_cmd service inspect "$gateway_service" >/dev/null \
+    || die "Agentgateway service is absent; a verified fresh installation uses full deploy after its fresh-storage receipt"
+  if [ "$READONLY_MCP_ENABLED" = 1 ]; then
+    # Render from the validated installation manifest and new generic base;
+    # never deploy MCP services or change their Secret attachments here.
+    render_readonly_mcp_profile
+    source="$READONLY_MCP_RENDERED_AGENTGATEWAY_CONFIG"
+    local mounted
+    mounted="$(docker_cmd service inspect "$gateway_service" --format '{{json .Spec.TaskTemplate.ContainerSpec.Secrets}}')"
+    while IFS= read -r secret; do
+      [ -z "$secret" ] || printf '%s' "$mounted" | jq -e --arg expected "$secret" \
+        'any(.[]?; .SecretName == $expected or .File.Name == $expected)' >/dev/null \
+        || die "Personal MCP route requires an already mounted backend Secret; reconcile it before model maintenance"
+    done < <(readonly_mcp_gateway_secret_names)
+  fi
+  local current_image desired_image_id current_image_id
+  desired_image_id="$(docker_cmd image inspect "$AGENTGATEWAY_IMAGE" --format '{{.Id}}')" \
+    || die "Pinned Agentgateway image must already be available locally"
+  current_image="$(docker_cmd service inspect "$gateway_service" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')"
+  current_image_id="$(docker_cmd image inspect "$current_image" --format '{{.Id}}' 2>/dev/null || true)"
+  if run_root cmp -s "$source" "${AGENTGATEWAY_DATA}/config.yaml" \
+    && [ "$(service_env_value "$gateway_service" AGENTGATEWAY_CHAT_MODEL_ID)" = "$LLAMACPP_CHAT_MODEL_ID" ] \
+    && [ "$(service_env_value "$gateway_service" AGENTGATEWAY_EMBEDDING_MODEL_ID)" = "$LLAMACPP_EMBEDDING_MODEL_ID" ] \
+    && [ "$current_image_id" = "$desired_image_id" ]; then
+    if [ "$READONLY_MCP_ENABLED" = 1 ]; then
+      rm -f -- "$READONLY_MCP_RENDER_DIR/config.yaml" "$READONLY_MCP_RENDER_DIR/compose.yaml"
+      rmdir -- "$READONLY_MCP_RENDER_DIR"
+    fi
+    wait_service_ready "$gateway_service"
+    log "Agentgateway native model routing already matches; running consumers and routes preserved"
+    return 0
+  fi
+  # A changed route must never dispatch into running old-vector consumers.
+  for service in openclaw-gateway openwebui; do
+    if docker_cmd service inspect "${STACK_NAME}_${service}" >/dev/null 2>&1; then
+      replicas="$(docker_cmd service inspect --format '{{.Spec.Mode.Replicated.Replicas}}' "${STACK_NAME}_${service}")"
+      [ "$replicas" = 0 ] || die "Stop model consumers before configuring migration routing: $service"
+    fi
+  done
+  install_if_changed "$source" "${AGENTGATEWAY_DATA}/config.yaml" 0640 "$APP_UID" "$APP_GID"
+  if [ "$READONLY_MCP_ENABLED" = 1 ]; then
+    rm -f -- "$READONLY_MCP_RENDER_DIR/config.yaml" "$READONLY_MCP_RENDER_DIR/compose.yaml"
+    rmdir -- "$READONLY_MCP_RENDER_DIR"
+  fi
+  docker_cmd service update --detach=true --no-resolve-image --image "$AGENTGATEWAY_IMAGE" --force \
+    --env-rm AGENTGATEWAY_CHAT_MODEL_ID --env-add "AGENTGATEWAY_CHAT_MODEL_ID=$LLAMACPP_CHAT_MODEL_ID" \
+    --env-rm AGENTGATEWAY_EMBEDDING_MODEL_ID --env-add "AGENTGATEWAY_EMBEDDING_MODEL_ID=$LLAMACPP_EMBEDDING_MODEL_ID" \
+    "$gateway_service" >/dev/null
+  sleep 2
+  wait_service_ready "$gateway_service"
+  log "Agentgateway model routing applied; personal MCP routes and consumer replicas preserved"
 }
 
 cmd_deploy() {
@@ -4146,16 +4450,26 @@ cmd_deploy() {
     accelerator="$(detect_accelerator)"
     validate_accelerator_compatibility "$accelerator"
   else
-    [ "$ACCELERATOR" != "auto" ] || die "Deploy from ${NODE_NAME} requires explicit --accelerator for LM Studio, or run deploy from ai01"
+    [ "$ACCELERATOR" != "auto" ] || die "Deploy from ${NODE_NAME} requires explicit --accelerator for llama.cpp, or run deploy from ai01"
     accelerator="$ACCELERATOR"
   fi
 
   local compose_args=()
+  load_llamacpp_catalog_selection "$accelerator"
+  require_completed_model_migration_before_deploy
+  export_model_images "$accelerator"
   # Compose interpolation reads only exported variables.  Keep the Coder
   # public URLs installation-specific from the very first task start; the
   # subsequent service-env reconciliation remains a drift repair, not the
   # mechanism that makes OIDC bootable.
-  export AUTHENTIK_HOST CODER_HOST
+  export AUTHENTIK_HOST CODER_HOST GITEA_HOST GITEA_SSH_PORT \
+    AUTHENTIK_IMAGE AUTHENTIK_POSTGRES_IMAGE AUTHENTIK_REDIS_IMAGE \
+    AI01_ROCM_GFX_VERSION AI02_ROCM_GFX_VERSION \
+    LLAMACPP_CPU_IMAGE LLAMACPP01_AMD_IMAGE LLAMACPP02_AMD_IMAGE LLAMACPP_NVIDIA_IMAGE \
+    OPENCLAW_IMAGE OPENWEBUI_IMAGE PORTAINER_IMAGE PORTAINER_AGENT_IMAGE \
+    AGENTGATEWAY_IMAGE \
+    GITEA_IMAGE GITEA_POSTGRES_IMAGE DOCKER_SOCKET_PROXY_IMAGE \
+    CODER_IMAGE CODER_POSTGRES_IMAGE AGENTGATEWAY_POSTGRES_IMAGE
   if [ "$CODER_ENABLED" = "1" ]; then
     [ "$CODER_HOST" != "coder.local" ] \
       || die "CODER_ENABLED requires an installation-specific CODER_HOST"
@@ -4165,14 +4479,12 @@ cmd_deploy() {
       || die "CODER_ENABLED requires ${INSTALLATION_DIR}/compose.coder.yaml with the public Coder URLs"
     log "Coder public endpoints: access=https://${CODER_HOST}; oidc-host=${AUTHENTIK_HOST}"
   fi
+  if [ "${GITEA_ENABLED:-0}" = "1" ]; then
+    [ "$GITEA_HOST" != "gitea.local" ] \
+      || die "GITEA_ENABLED requires an installation-specific GITEA_HOST"
+    log "Gitea public endpoints: https://${GITEA_HOST}; ssh=${GITEA_SSH_PORT}"
+  fi
   ensure_ai_stand_secrets
-  # The personal GigaCode overlay references this external Secret.  On the
-  # existing installation Authentik is already running, so resolve akadmin's
-  # immutable subject before `docker stack deploy` validates external
-  # secrets.  Keeping this before the deploy avoids a partial rollout where
-  # OpenClaw cannot start because the map does not yet exist.
-  ensure_openclaw_gigacode_requester_map
-  configure_metamcp_personal_facades
   # This writes the generated Agentgateway config and Compose overlay only
   # after the protected inventory has passed its complete, fail-closed
   # validation. With the feature disabled it restores the generic config.
@@ -4181,12 +4493,19 @@ cmd_deploy() {
     compose_args+=("$arg")
   done < <(compose_args_for_accelerator "$accelerator")
 
-  docker_cmd stack config "${compose_args[@]}" >/tmp/ai-stand-stack-config.yaml
+  export_controller_environment
+  # The Gateway's service key directory (compose.yaml) follows the installation's storage root.
+  export SSH_SERVICE_KEYS_ROOT
+  # Validation only. The rendered configuration carries literal credentials
+  # (Authentik bootstrap and secret key, database passwords, gateway keys), so
+  # it must not be left behind in a world-readable temporary file.
+  docker_cmd stack config "${compose_args[@]}" >/dev/null
   docker_cmd stack deploy --resolve-image never "${compose_args[@]}" "$STACK_NAME"
+  ensure_llamacpp_runtime_groups
   reconcile_coder_profile_urls
   remove_obsolete_services
   apply_installation_service_env
-  ensure_metamcp_bootstrap_user
+  sync_agentgateway_llm_jwks soft
   if [ "$READONLY_MCP_ENABLED" = "1" ]; then
     sync_readonly_mcp_runtime
   fi
@@ -4213,6 +4532,10 @@ cmd_reconcile_mcp() {
       || die "Read-only MCP image is missing: $image; run apply.sh images on ai01 before enabling the reconciler"
   done
 
+  # The controller container runs this command with the checkout mounted
+  # read-only; the Open WebUI access configuration is maintained by the host
+  # and deploy stages, so only the snapshot is refreshed here.
+  OPENWEBUI_MODEL_ACCESS_SKIP_INSTALL=1
   sync_readonly_mcp_runtime
   sync_openwebui_persistent_config
   log "Read-only MCP manifest applied without a generic stack deploy"
@@ -4315,24 +4638,24 @@ PYEOF
   fi
 }
 
-# The five-minute reconciler must not use the installation bootstrap token.
-# It needs precisely three Authentik API capabilities: list ai-users, read
-# their group membership, and write its non-secret provisioning status. Keep
+# Five-minute model ACL and MCP reconciliation share a limited identity reader.
+# Both list users/groups; only enabled MCP provisioning needs change_user to
+# write its non-secret provisioning status. Never use the bootstrap bearer. Keep
 # that capability on a dedicated non-interactive service account; the only
 # copy of its bearer is a root-only host file consumed by the reconciler.
 ensure_readonly_mcp_authentik_service_token() {
-  [ "$READONLY_MCP_ENABLED" = "1" ] || return 0
   [ "$NODE_NAME" = "ai01" ] || return 0
 
   local server_container secret_file
   server_container="$(docker_cmd ps --filter "name=${STACK_NAME}_authentik-server." --format '{{.ID}}' | head -n 1 || true)"
-  [ -n "$server_container" ] || die "Cannot find Authentik server for read-only MCP service account"
+  [ -n "$server_container" ] || die "Cannot find Authentik server for the shared identity reader"
   secret_file="${AI_STAND_SECRETS_DIR}/readonly-mcp-authentik-api-token"
 
   # The marker is removed by sed before anything can reach this process's
   # stdout. The token is streamed straight into the root-only file rather
   # than retained in a shell variable, command line, Docker label or log.
-  if ! docker_cmd exec -i -e AK_SERVICE_ACCOUNT=ai-stand-readonly-mcp-reconciler "$server_container" ak shell <<'PYEOF' \
+  if ! docker_cmd exec -i -e AK_SERVICE_ACCOUNT=ai-stand-readonly-mcp-reconciler \
+    -e "AK_MCP_STATUS_WRITES=${READONLY_MCP_ENABLED}" "$server_container" ak shell <<'PYEOF' \
     | sed -n 's/^AI_STAND_READONLY_MCP_TOKEN //p' \
     | run_root tee "$secret_file" >/dev/null
 import os
@@ -4343,7 +4666,7 @@ username = os.environ["AK_SERVICE_ACCOUNT"]
 user, _created = User.objects.get_or_create(
     username=username,
     defaults={
-        "name": "ai-stand read-only MCP reconciler",
+        "name": "ai-stand shared identity reader",
         "type": "service_account",
         "is_active": True,
     },
@@ -4356,7 +4679,16 @@ if not user.is_active:
 
 role, _created = Role.objects.get_or_create(name="ai-stand-readonly-mcp-reconciler")
 required = []
-for model, codename in (("group", "view_group"), ("user", "view_user"), ("user", "change_user")):
+permissions = [("group", "view_group"), ("user", "view_user")]
+if os.environ.get("AK_MCP_STATUS_WRITES") == "1":
+    permissions.append(("user", "change_user"))
+else:
+    # assign_perms adds permissions; explicitly revoke the optional write
+    # capability when an existing installation disables MCP provisioning.
+    role.remove_perms([Permission.objects.get(
+        content_type__app_label="authentik_core", content_type__model="user", codename="change_user",
+    )])
+for model, codename in permissions:
     required.append(Permission.objects.get(
         # Authentik exposes its API permissions under the concrete
         # ``authentik_core`` Django app label (not the historical ``core``
@@ -4383,13 +4715,13 @@ print("AI_STAND_READONLY_MCP_TOKEN " + token.key)
 PYEOF
   then
     run_root rm -f "$secret_file"
-    die "Cannot create the limited Authentik service token for read-only MCP reconciliation"
+    die "Cannot create the limited shared Authentik identity-reader token"
   fi
   run_root chown root:root "$secret_file"
   run_root chmod 0600 "$secret_file"
   run_root test -s "$secret_file" \
-    || die "Authentik service account did not return a read-only MCP token"
-  log "Limited Authentik service account for read-only MCP reconciliation is ready"
+    || die "Authentik service account did not return an identity-reader token"
+  log "Limited shared Authentik identity reader is ready"
 }
 
 cmd_configure_authentik() {
@@ -4410,7 +4742,6 @@ cmd_configure_authentik() {
 
   ensure_authentik_bootstrap_identity
   ensure_readonly_mcp_authentik_service_token
-  ensure_openclaw_gigacode_requester_map
 
   # Secret-bearing values go through the environment (-e VARNAME, no
   # =value) rather than --env VARNAME=value, so they never appear as
@@ -4420,9 +4751,9 @@ cmd_configure_authentik() {
     local -x AUTHENTIK_API_TOKEN="$AUTHENTIK_BOOTSTRAP_TOKEN"
     local -x AUTHENTIK_OPENWEBUI_CLIENT_SECRET="$AUTHENTIK_OPENWEBUI_CLIENT_SECRET"
     local -x AUTHENTIK_PORTAINER_CLIENT_SECRET="$AUTHENTIK_PORTAINER_CLIENT_SECRET"
-    local -x AUTHENTIK_METAMCP_CLIENT_SECRET="$AUTHENTIK_METAMCP_CLIENT_SECRET"
     local -x AUTHENTIK_AGENTGATEWAY_CLIENT_SECRET="$AUTHENTIK_AGENTGATEWAY_CLIENT_SECRET"
     local -x AUTHENTIK_CODER_CLIENT_SECRET="$AUTHENTIK_CODER_CLIENT_SECRET"
+    local -x AUTHENTIK_GITEA_CLIENT_SECRET="${AUTHENTIK_GITEA_CLIENT_SECRET:-}"
     docker_cmd run \
       --rm \
       --pull never \
@@ -4433,17 +4764,23 @@ cmd_configure_authentik() {
       --env "AUTHENTIK_BOOTSTRAP_USERNAME=${AUTHENTIK_BOOTSTRAP_USERNAME}" \
       -e AUTHENTIK_OPENWEBUI_CLIENT_SECRET \
       -e AUTHENTIK_PORTAINER_CLIENT_SECRET \
-      -e AUTHENTIK_METAMCP_CLIENT_SECRET \
       -e AUTHENTIK_AGENTGATEWAY_CLIENT_SECRET \
       -e AUTHENTIK_CODER_CLIENT_SECRET \
+      -e AUTHENTIK_GITEA_CLIENT_SECRET \
       --env "AUTHENTIK_OPENWEBUI_URL=https://${OPENWEBUI_HOST}" \
       --env "AUTHENTIK_OPENCLAW_URL=https://${OPENCLAW_HOST}" \
       --env "AUTHENTIK_PORTAINER_URL=https://${PORTAINER_HOST}" \
-      --env "AUTHENTIK_METAMCP_URL=https://${METAMCP_HOST}" \
       --env "AUTHENTIK_AGENTGATEWAY_URL=https://${AGENTGATEWAY_HOST}" \
       --env "AUTHENTIK_CODER_URL=https://${CODER_HOST}" \
+      --env "AUTHENTIK_GITEA_ENABLED=$( [ "${GITEA_ENABLED:-0}" = "1" ] && printf true || printf false )" \
+      --env "AUTHENTIK_GITEA_URL=https://${GITEA_HOST}" \
       "$AUTHENTIK_CONFIGURATOR_IMAGE"
   )
+
+  # The ai-stand-llm provider exists now: hand its signing keys to Agentgateway
+  # first (this waits for the service to be ready), then force the fresh load
+  # below, so the two asynchronous service updates never overlap.
+  sync_agentgateway_llm_jwks hard
 
   # agentgateway's OIDC issuer/client secret already have real values from
   # the moment it was first deployed (see apply_installation_service_env())
@@ -4460,12 +4797,711 @@ cmd_configure_authentik() {
   log "Authentik configuration stage complete"
 }
 
+publish_coder_template() {
+  local language="$1"
+  local display_name="$2"
+  local slug="${language}-personal"
+  local source_dir="${SCRIPT_DIR}/docker/coder-templates/${language}"
+  local container postgres_container
+
+  [ -d "$source_dir" ] || die "Coder template source is missing: ${source_dir}"
+  container="$(docker_cmd ps --filter "label=com.docker.swarm.service.name=${STACK_NAME}_coder" --format '{{.ID}}' | head -n 1 || true)"
+  [ -n "$container" ] || die "No local Coder container is running on ai02"
+  postgres_container="$(docker_cmd ps --filter "label=com.docker.swarm.service.name=${STACK_NAME}_coder-postgresql" --format '{{.ID}}')"
+  [ -n "$postgres_container" ] && [[ "$postgres_container" != *$'\n'* ]] \
+    || die "Exactly one native Coder PostgreSQL container is required for read-only policy verification"
+  # The templates mount the owner's key directory only when they are told where the keys live.
+  local -a variable_args=()
+  if [ "${SSH_KEY_DELIVERY_ENABLED:-0}" = "1" ]; then
+    variable_args+=(--variable "ssh_keys_root=${SSH_KEYS_ROOT}")
+  fi
+  # Approved Free policy: native creation atomically grants Everyone read/use,
+  # not edit. Existing private templates require an explicit migration choice.
+  run_root python3 "${SCRIPT_DIR}/docker/coder-templates/publisher.py" publish \
+    --coder-container "$container" \
+    --postgres-container "$postgres_container" --access-policy shared-vetted \
+    --token-file "$CODER_TEMPLATE_PUBLISHER_TOKEN_FILE" \
+    --source-dir "$source_dir" --slug "$slug" --display-name "$display_name" \
+    "${variable_args[@]}"
+}
+
+ensure_coder_template_publisher() {
+  local container postgres_container
+  container="$(docker_cmd ps --filter "label=com.docker.swarm.service.name=${STACK_NAME}_coder" --format '{{.ID}}' | head -n 1 || true)"
+  postgres_container="$(docker_cmd ps --filter "label=com.docker.swarm.service.name=${STACK_NAME}_coder-postgresql" --format '{{.ID}}' | head -n 1 || true)"
+  [ -n "$container" ] && [ -n "$postgres_container" ] \
+    || die "Coder and PostgreSQL must be running locally before publishing templates"
+  command_exists python3 || die "Coder template publisher requires host Python 3"
+  run_root python3 "${SCRIPT_DIR}/docker/coder-templates/publisher.py" bootstrap \
+    --coder-container "$container" --postgres-container "$postgres_container" \
+    --image "$CODER_IMAGE" --token-file "$CODER_TEMPLATE_PUBLISHER_TOKEN_FILE" \
+    --postgres-password-file "${AI_STAND_SECRETS_DIR}/coder-postgres-password" \
+    --admin-password-file "${AI_STAND_SECRETS_DIR}/coder-admin-password" \
+    --admin-username "$CODER_ADMIN_USERNAME" --admin-email "$CODER_ADMIN_EMAIL"
+}
+
+cmd_templates() {
+  load_os_info
+  [ "$CODER_ENABLED" = "1" ] || { log "Coder is disabled; no templates to publish"; return 0; }
+  [ "$NODE_NAME" = "ai02" ] || die "templates must run on ai02, where Coder is placed"
+  wait_service_ready "${STACK_NAME}_coder"
+  wait_service_ready "${STACK_NAME}_docker-socket-proxy-coder"
+  check_coder_docker_endpoint
+
+  # Missing/expired tokens are bootstrapped without changing the public
+  # password=false runtime. Permission/auth failures stop the stage; they
+  # must not be reported as successful deployment with no templates.
+  ensure_coder_template_publisher
+  publish_coder_template csharp 'C#'
+  publish_coder_template python Python
+}
+
+cmd_configure_gitea() {
+  [ "${GITEA_ENABLED:-0}" = "1" ] || die "configure-gitea requires GITEA_ENABLED=1"
+  [ "$NODE_NAME" = "ai01" ] || die "configure-gitea must run on ai01, where Gitea is placed"
+
+  wait_service_ready "${STACK_NAME}_gitea-postgresql"
+  wait_service_ready "${STACK_NAME}_gitea"
+  local container postgres_container source_record source_id source_type source_provider
+  container="$(docker_cmd ps --filter "label=com.docker.swarm.service.name=${STACK_NAME}_gitea" --format '{{.ID}}' | head -n 1 || true)"
+  [ -n "$container" ] || die "No local Gitea container is running on ai01"
+  postgres_container="$(docker_cmd ps --filter "label=com.docker.swarm.service.name=${STACK_NAME}_gitea-postgresql" --format '{{.ID}}' | head -n 1 || true)"
+  [ -n "$postgres_container" ] || die "No local Gitea PostgreSQL container is running on ai01"
+
+  # `login_source.name` is unique in Gitea.  Inspect precisely that one row
+  # through a fixed, read-only query before writing anything.  Do not use an
+  # interpolated SQL value: the managed source name is intentionally a literal
+  # and the actual mutation below stays on Gitea's supported native CLI.
+  source_record="$(
+    docker_cmd exec "$postgres_container" \
+      psql -X -qAt -F $'\t' -U gitea -d gitea \
+        -c "SELECT id, type, COALESCE(cfg::jsonb ->> 'Provider', '') FROM login_source WHERE name = 'authentik';"
+  )" || die "Cannot inspect the exact Gitea authentication source"
+
+  source_id=""
+  if [ -n "$source_record" ]; then
+    [ "$(printf '%s\n' "$source_record" | wc -l | tr -d '[:space:]')" = "1" ] \
+      || die "Conflicting Gitea authentication sources named authentik"
+    IFS=$'\t' read -r source_id source_type source_provider <<EOF
+$source_record
+EOF
+    [[ "$source_id" =~ ^[1-9][0-9]*$ ]] \
+      || die "Malformed Gitea authentication source named authentik"
+    [ "$source_type" = "6" ] && [ "$source_provider" = "openidConnect" ] \
+      || die "Conflicting Gitea authentication source named authentik is not the managed OAuth2/OpenID Connect source"
+  fi
+
+  # A managed exact OAuth/OIDC source is updated on every deployment, so
+  # corrected scopes and Authentik settings converge rather than being hidden
+  # by a broad `grep`.  Gitea 28 uses a StringSlice flag: each requested scope
+  # must have its own --scopes argument; `openid` itself is implicit for OIDC.
+  # The Docker Secret is read only inside the short-lived Gitea exec and is
+  # never written to stdout, stderr, SQL or host environment.
+  if [ -n "$source_id" ]; then
+    docker_cmd exec \
+      -e "AUTHENTIK_HOST=${AUTHENTIK_HOST}" \
+      -e "GITEA_AUTH_SOURCE_ID=${source_id}" \
+      "$container" sh -eu -c '
+        secret="$(cat /run/secrets/ai-stand-authentik-gitea-client-secret)"
+        exec gitea admin auth update-oauth \
+          --config /etc/gitea/app.ini \
+          --id "$GITEA_AUTH_SOURCE_ID" \
+          --name authentik \
+          --provider openidConnect \
+          --key gitea \
+          --secret "$secret" \
+          --auto-discover-url "https://${AUTHENTIK_HOST}/application/o/gitea/.well-known/openid-configuration" \
+          --scopes profile --scopes email --scopes groups \
+          --group-claim-name groups \
+          --admin-group ai-admins \
+          --skip-local-2fa
+      ' >/dev/null
+  else
+    docker_cmd exec \
+      -e "AUTHENTIK_HOST=${AUTHENTIK_HOST}" \
+      "$container" sh -eu -c '
+        secret="$(cat /run/secrets/ai-stand-authentik-gitea-client-secret)"
+        exec gitea admin auth add-oauth \
+          --config /etc/gitea/app.ini \
+          --name authentik \
+          --provider openidConnect \
+          --key gitea \
+          --secret "$secret" \
+          --auto-discover-url "https://${AUTHENTIK_HOST}/application/o/gitea/.well-known/openid-configuration" \
+          --scopes profile --scopes email --scopes groups \
+          --group-claim-name groups \
+          --admin-group ai-admins \
+          --skip-local-2fa
+      ' >/dev/null
+  fi
+  log "Gitea Authentik OIDC source is ready"
+}
+
+# --- Gitea SSH-key synchronizer (docker/gitea-ssh-sync) -----------------------------------------------------------------
+# The service registers each ai-users member's SSH public key (an Authentik
+# attribute) in their Gitea account. It runs as an ordinary Swarm service with
+# two Docker secrets: a view-only Authentik service token and the token of a
+# dedicated local Gitea administrator (Gitea has no narrower token that can
+# manage other users' keys). Both credentials are issued by services that must
+# already be running, so the service is deployed by this stage, alone, after
+# they exist - see compose.gitea-ssh-sync.yaml.
+GITEA_SSH_SYNC_ACCOUNT="ai-stand-ssh-sync"
+
+# Read-only Authentik identity for the synchronizer: it may only view users
+# (their attributes carry the public key) and groups. The token is stable
+# (get_or_create), so a re-run returns the same value.
+ensure_gitea_ssh_sync_authentik_token() {
+  local server_container secret_file candidate
+  server_container="$(docker_cmd ps --filter "name=${STACK_NAME}_authentik-server." --format '{{.ID}}' | head -n 1 || true)"
+  [ -n "$server_container" ] || die "Cannot find the Authentik server for the Gitea SSH-key synchronizer"
+  secret_file="${AI_STAND_SECRETS_DIR}/gitea-ssh-sync-authentik-api-token"
+  candidate="${secret_file}.new"
+  run_root rm -f "$candidate"
+
+  # The marker is removed by sed before anything can reach this process's
+  # stdout; the token goes straight into a root-only file, never a shell
+  # variable, command line or log.
+  if ! docker_cmd exec -i "$server_container" ak shell <<'PYEOF' \
+    | sed -n 's/^AI_STAND_GITEA_SSH_SYNC_TOKEN //p' \
+    | run_root tee "$candidate" >/dev/null
+from authentik.core.models import Token, TokenIntents, User
+from authentik.rbac.models import Permission, Role
+
+username = "ai-stand-gitea-ssh-sync"
+user, _created = User.objects.get_or_create(
+    username=username,
+    defaults={"name": "ai-stand Gitea SSH-key synchronizer", "type": "service_account", "is_active": True},
+)
+if user.type != "service_account":
+    raise RuntimeError("existing Gitea SSH-key synchronizer identity is not a service account")
+if not user.is_active:
+    user.is_active = True
+    user.save(update_fields=["is_active"])
+
+role, _created = Role.objects.get_or_create(name=username)
+role.assign_perms([
+    Permission.objects.get(content_type__app_label="authentik_core", content_type__model=model, codename=codename)
+    for model, codename in (("group", "view_group"), ("user", "view_user"))
+])
+user.roles.add(role)
+
+token, _created = Token.objects.get_or_create(
+    identifier=username,
+    defaults={"user": user, "intent": TokenIntents.INTENT_API, "expiring": False},
+)
+if token.user_id != user.pk or token.intent != TokenIntents.INTENT_API:
+    raise RuntimeError("existing Gitea SSH-key synchronizer token has an unexpected owner or intent")
+if token.expiring:
+    token.expiring = False
+    token.expires = None
+    token.save(update_fields=["expiring", "expires"])
+print("AI_STAND_GITEA_SSH_SYNC_TOKEN " + token.key)
+PYEOF
+  then
+    run_root rm -f "$candidate"
+    die "Cannot create the Gitea SSH-key synchronizer's Authentik service token"
+  fi
+  run_root test -s "$candidate" \
+    || { run_root rm -f "$candidate"; die "Authentik did not return the Gitea SSH-key synchronizer token"; }
+  run_root chown root:root "$candidate"
+  run_root chmod 0600 "$candidate"
+  if run_root test -s "$secret_file" && run_root cmp -s "$candidate" "$secret_file"; then
+    run_root rm -f "$candidate"
+  else
+    run_root mv -f "$candidate" "$secret_file"
+    GITEA_SSH_SYNC_AUTHENTIK_TOKEN_CHANGED=1
+  fi
+  log "Gitea SSH-key synchronizer's Authentik service identity is ready"
+}
+
+# True when the stored token authenticates as the synchronizer's administrator.
+# The token reaches the container through stdin, never a command line.
+gitea_ssh_sync_token_works() {
+  local container="$1" secret_file="$2" answer
+  run_root test -s "$secret_file" || return 1
+  answer="$(run_root cat "$secret_file" | docker_cmd exec -i "$container" sh -c \
+    'T="$(cat)"; exec wget -qO- --header "Authorization: token $T" http://127.0.0.1:3000/api/v1/user' 2>/dev/null)" || return 1
+  printf '%s' "$answer" \
+    | jq -e --arg user "$GITEA_SSH_SYNC_ACCOUNT" '.login == $user and .is_admin == true' >/dev/null 2>&1
+}
+
+# A dedicated local administrator without a usable password (sign-in forms and
+# basic authentication are disabled anyway) and an access token limited to the
+# admin and user API scopes. Gitea shows a token once; a lost or broken token is
+# replaced by a new one under a new name.
+ensure_gitea_ssh_sync_gitea_token() {
+  local container secret_file candidate admin_list
+  container="$(docker_cmd ps --filter "label=com.docker.swarm.service.name=${STACK_NAME}_gitea" --format '{{.ID}}' | head -n 1 || true)"
+  [ -n "$container" ] || die "No local Gitea container is running on ai01"
+  secret_file="${AI_STAND_SECRETS_DIR}/gitea-ssh-sync-gitea-token"
+
+  if gitea_ssh_sync_token_works "$container" "$secret_file"; then
+    log "Gitea SSH-key synchronizer's administrator token is valid"
+    return 0
+  fi
+
+  admin_list="$(docker_cmd exec "$container" gitea --config /etc/gitea/app.ini admin user list --admin)" \
+    || die "Cannot list Gitea administrators"
+  if ! printf '%s\n' "$admin_list" | awk -v user="$GITEA_SSH_SYNC_ACCOUNT" 'NR > 1 && $2 == user { found = 1 } END { exit !found }'; then
+    # The generated password is printed once by the CLI and deliberately dropped.
+    docker_cmd exec "$container" gitea --config /etc/gitea/app.ini admin user create \
+      --username "$GITEA_SSH_SYNC_ACCOUNT" \
+      --email "${GITEA_SSH_SYNC_ACCOUNT}@${GITEA_HOST}" \
+      --admin --random-password --must-change-password=false >/dev/null \
+      || die "Cannot create the Gitea SSH-key synchronizer administrator"
+    log "Created the Gitea administrator ${GITEA_SSH_SYNC_ACCOUNT}"
+  fi
+
+  candidate="${secret_file}.new"
+  run_root rm -f "$candidate"
+  if ! docker_cmd exec "$container" gitea --config /etc/gitea/app.ini admin user generate-access-token \
+      --username "$GITEA_SSH_SYNC_ACCOUNT" \
+      --token-name "ai-stand-ssh-sync-$(date -u +%Y%m%dT%H%M%SZ)" \
+      --scopes write:admin,read:user --raw | run_root tee "$candidate" >/dev/null; then
+    run_root rm -f "$candidate"
+    die "Cannot issue the Gitea SSH-key synchronizer's administrator token"
+  fi
+  run_root chown root:root "$candidate"
+  run_root chmod 0600 "$candidate"
+  if ! run_root grep -Eq '^[0-9a-f]{40}$' "$candidate"; then
+    run_root rm -f "$candidate"
+    die "Gitea returned an unexpected token format for the SSH-key synchronizer"
+  fi
+  run_root mv -f "$candidate" "$secret_file"
+  GITEA_SSH_SYNC_GITEA_TOKEN_CHANGED=1
+  gitea_ssh_sync_token_works "$container" "$secret_file" \
+    || die "The new Gitea SSH-key synchronizer token does not authenticate as an administrator"
+  log "Gitea SSH-key synchronizer's administrator token is ready"
+}
+
+# The Gitea account of each service account (SSH_SERVICE_ACCOUNTS): a plain local account without a usable password, not an
+# administrator and owning nothing. The owner gives it access to the repositories it may use; its SSH public key is
+# registered by this synchronizer from the Authentik account of the same name (which configure-ssh-key-delivery created
+# and gave a key). Created only when missing.
+ensure_gitea_service_accounts() {
+  local container user_list username
+  [ -n "$SSH_SERVICE_ACCOUNTS" ] || return 0
+  container="$(docker_cmd ps --filter "label=com.docker.swarm.service.name=${STACK_NAME}_gitea" --format '{{.ID}}' | head -n 1 || true)"
+  [ -n "$container" ] || die "No local Gitea container is running on ai01"
+  user_list="$(docker_cmd exec "$container" gitea --config /etc/gitea/app.ini admin user list)" \
+    || die "Cannot list Gitea accounts"
+  for username in $(printf '%s' "$SSH_SERVICE_ACCOUNTS" | tr ',' '\n' | sed -n 's/^[^=]*=//p'); do
+    if ! printf '%s\n' "$user_list" | awk -v user="$username" 'NR > 1 && $2 == user { found = 1 } END { exit !found }'; then
+      # The generated password is printed once by the CLI and deliberately dropped.
+      docker_cmd exec "$container" gitea --config /etc/gitea/app.ini admin user create \
+        --username "$username" --email "${username}@${GITEA_HOST}" \
+        --random-password --must-change-password=false >/dev/null \
+        || die "Cannot create the Gitea account ${username}"
+      log "Created the Gitea account ${username}"
+    fi
+  done
+}
+
+# Docker secrets cannot be edited: when a credential was replaced, remove the
+# service and the stale secret first so the new value is what the next task reads.
+ensure_gitea_ssh_sync_secret() {
+  local secret_name="$1" file_name="$2" changed="$3"
+  if [ "$changed" = "1" ] && docker_cmd secret inspect "$secret_name" >/dev/null 2>&1; then
+    docker_cmd service rm "${STACK_NAME}_gitea-ssh-sync" >/dev/null 2>&1 || true
+    docker_cmd secret rm "$secret_name" >/dev/null
+    log "Replaced stale Docker secret: ${secret_name}"
+  fi
+  ensure_docker_secret_from_value "$secret_name" "$(run_root cat "${AI_STAND_SECRETS_DIR}/${file_name}")"
+}
+
+cmd_configure_gitea_ssh_sync() {
+  [ "${GITEA_SSH_SYNC_ENABLED:-0}" = "1" ] || die "configure-gitea-ssh-sync requires GITEA_SSH_SYNC_ENABLED=1"
+  [ "${GITEA_ENABLED:-0}" = "1" ] || die "configure-gitea-ssh-sync requires GITEA_ENABLED=1"
+  [ "$NODE_NAME" = "ai01" ] || die "configure-gitea-ssh-sync must run on ai01, where Gitea is placed"
+  docker_cmd image inspect "$GITEA_SSH_SYNC_IMAGE" >/dev/null 2>&1 \
+    || die "Missing image ${GITEA_SSH_SYNC_IMAGE}; run apply.sh images on ai01 first"
+
+  wait_service_ready "${STACK_NAME}_authentik-server"
+  wait_service_ready "${STACK_NAME}_gitea-postgresql"
+  wait_service_ready "${STACK_NAME}_gitea"
+
+  GITEA_SSH_SYNC_AUTHENTIK_TOKEN_CHANGED=0
+  GITEA_SSH_SYNC_GITEA_TOKEN_CHANGED=0
+  ensure_gitea_ssh_sync_authentik_token
+  ensure_gitea_ssh_sync_gitea_token
+
+  # The synchronizer trusts only accounts created through this OIDC source.
+  local postgres_container auth_source_id
+  postgres_container="$(docker_cmd ps --filter "label=com.docker.swarm.service.name=${STACK_NAME}_gitea-postgresql" --format '{{.ID}}' | head -n 1 || true)"
+  [ -n "$postgres_container" ] || die "No local Gitea PostgreSQL container is running on ai01"
+  auth_source_id="$(docker_cmd exec "$postgres_container" \
+    psql -X -qAt -U gitea -d gitea \
+      -c "SELECT id FROM login_source WHERE name = 'authentik' AND type = 6;")" \
+    || die "Cannot read the Gitea authentication source"
+  [[ "$auth_source_id" =~ ^[1-9][0-9]*$ ]] \
+    || die "The Gitea Authentik source is missing; run configure-gitea first"
+
+  ensure_gitea_ssh_sync_secret ai-stand-gitea-ssh-sync-authentik-token gitea-ssh-sync-authentik-api-token \
+    "$GITEA_SSH_SYNC_AUTHENTIK_TOKEN_CHANGED"
+  ensure_gitea_ssh_sync_secret ai-stand-gitea-ssh-sync-gitea-token gitea-ssh-sync-gitea-token \
+    "$GITEA_SSH_SYNC_GITEA_TOKEN_CHANGED"
+
+  ensure_gitea_service_accounts
+  GITEA_SSH_SYNC_SERVICE_ACCOUNTS="$(printf '%s' "$SSH_SERVICE_ACCOUNTS" | tr ',' '\n' | sed -n 's/^[^=]*=//p' | paste -sd, -)"
+  export STACK_NAME GITEA_SSH_SYNC_IMAGE GITEA_SSH_SYNC_APPLY="${GITEA_SSH_SYNC_APPLY:-1}"
+  export GITEA_SSH_SYNC_AUTH_SOURCE_ID="$auth_source_id" GITEA_SSH_SYNC_SERVICE_ACCOUNTS
+  docker_cmd stack config -c "$COMPOSE_GITEA_SSH_SYNC_FILE" >/dev/null
+  docker_cmd stack deploy --resolve-image never -c "$COMPOSE_GITEA_SSH_SYNC_FILE" "$STACK_NAME"
+  wait_gitea_ssh_sync_running
+  log "Gitea SSH-key synchronizer is running (apply=${GITEA_SSH_SYNC_APPLY:-1})"
+}
+
+# wait_service_ready waits up to three hours for a service that cannot start;
+# this optional service should fail fast instead.
+wait_gitea_ssh_sync_running() {
+  local service="${STACK_NAME}_gitea-ssh-sync" replicas
+  local deadline=$(( $(date +%s) + 300 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    replicas="$(docker_cmd service ls --filter "name=${service}" --format '{{.Name}} {{.Replicas}}' | awk -v name="$service" '$1 == name { print $2 }')"
+    if [ "$replicas" = "1/1" ]; then
+      log "Service ready: ${service}"
+      return 0
+    fi
+    sleep 5
+  done
+  docker_cmd service ps "$service" --no-trunc || true
+  die "Service did not become ready within five minutes: ${service}"
+}
+
+ensure_ssh_key_delivery_authentik_token() {
+  local server_container secret_file candidate
+  server_container="$(docker_cmd ps --filter "name=${STACK_NAME}_authentik-server." --format '{{.ID}}' | head -n 1 || true)"
+  [ -n "$server_container" ] || die "Cannot find the Authentik server for the SSH key delivery"
+  secret_file="${AI_STAND_SECRETS_DIR}/ssh-key-delivery-authentik-api-token"
+  candidate="${secret_file}.new"
+  run_root rm -f "$candidate"
+
+  # The marker is removed by sed before anything can reach this process's
+  # stdout; the token goes straight into a root-only file, never a shell
+  # variable, command line or log.
+  if ! docker_cmd exec -i "$server_container" ak shell <<'PYEOF' \
+    | sed -n 's/^AI_STAND_SSH_KEY_DELIVERY_TOKEN //p' \
+    | run_root tee "$candidate" >/dev/null
+from authentik.core.models import Token, TokenIntents, User
+from authentik.rbac.models import Permission, Role
+
+username = "ai-stand-ssh-key-delivery"
+user, _created = User.objects.get_or_create(
+    username=username,
+    defaults={"name": "ai-stand SSH key delivery", "type": "service_account", "is_active": True},
+)
+if user.type != "service_account":
+    raise RuntimeError("existing SSH key delivery identity is not a service account")
+if not user.is_active:
+    user.is_active = True
+    user.save(update_fields=["is_active"])
+
+role, _created = Role.objects.get_or_create(name=username)
+role.assign_perms([
+    Permission.objects.get(content_type__app_label="authentik_core", content_type__model=model, codename=codename)
+    for model, codename in (("group", "view_group"), ("user", "view_user"))
+])
+user.roles.add(role)
+
+token, _created = Token.objects.get_or_create(
+    identifier=username,
+    defaults={"user": user, "intent": TokenIntents.INTENT_API, "expiring": False},
+)
+if token.user_id != user.pk or token.intent != TokenIntents.INTENT_API:
+    raise RuntimeError("existing SSH key delivery token has an unexpected owner or intent")
+if token.expiring:
+    token.expiring = False
+    token.expires = None
+    token.save(update_fields=["expiring", "expires"])
+print("AI_STAND_SSH_KEY_DELIVERY_TOKEN " + token.key)
+PYEOF
+  then
+    run_root rm -f "$candidate"
+    die "Cannot create the SSH key delivery's Authentik service token"
+  fi
+  run_root test -s "$candidate" \
+    || { run_root rm -f "$candidate"; die "Authentik did not return the SSH key delivery token"; }
+  run_root chown root:root "$candidate"
+  run_root chmod 0600 "$candidate"
+  if run_root test -s "$secret_file" && run_root cmp -s "$candidate" "$secret_file"; then
+    run_root rm -f "$candidate"
+  else
+    run_root mv -f "$candidate" "$secret_file"
+    SSH_KEY_DELIVERY_AUTHENTIK_TOKEN_CHANGED=1
+  fi
+  log "SSH key delivery's Authentik service identity is ready"
+}
+
+# The Authentik accounts that hold the dedicated keys of services (SSH_SERVICE_ACCOUNTS=name=username,...). They are
+# service accounts, so they cannot sign in and are in no group. An account without a private key gets a fresh Ed25519
+# pair (OpenSSH format, no passphrase) in the attributes of a person's key, generated inside Authentik so the private
+# half never reaches this shell, a log or a file; a key that is already there - generated earlier or put there by the
+# owner - is never replaced. Created and generated only when missing, so a rerun changes nothing.
+ensure_ssh_key_delivery_service_accounts() {
+  local server_container usernames
+  usernames="$(printf '%s' "$SSH_SERVICE_ACCOUNTS" | tr ',' '\n' | sed -n 's/^[^=]*=//p' | paste -sd, -)"
+  [ -n "$usernames" ] || return 0
+  server_container="$(docker_cmd ps --filter "name=${STACK_NAME}_authentik-server." --format '{{.ID}}' | head -n 1 || true)"
+  [ -n "$server_container" ] || die "Cannot find the Authentik server for the SSH key delivery"
+  docker_cmd exec -i -e "AI_STAND_SERVICE_ACCOUNTS=${usernames}" "$server_container" ak shell <<'PYEOF' \
+    | sed -n 's/^AI_STAND_SERVICE_ACCOUNT //p' | while IFS= read -r line; do log "service key account: ${line}"; done
+import os
+from authentik.core.models import User
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+for username in filter(None, os.environ["AI_STAND_SERVICE_ACCOUNTS"].split(",")):
+    user, created = User.objects.get_or_create(
+        username=username,
+        defaults={"name": "ai-stand service SSH key", "type": "service_account", "is_active": True},
+    )
+    if user.type != "service_account":
+        raise RuntimeError("the account for a service key exists but is not a service account")
+    attributes = dict(user.attributes or {})
+    state = "created" if created else "exists"
+    if not str(attributes.get("ai_stand_git_ssh_private_key") or "").strip():
+        key = Ed25519PrivateKey.generate()
+        attributes["ai_stand_git_ssh_private_key"] = key.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.OpenSSH, serialization.NoEncryption()).decode()
+        attributes["ai_stand_git_ssh_public_key"] = key.public_key().public_bytes(
+            serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH).decode() + " " + username
+        user.attributes = attributes
+        user.save(update_fields=["attributes"])
+        state += ", key generated"
+    print("AI_STAND_SERVICE_ACCOUNT " + username + " " + state)
+PYEOF
+}
+
+# The sender and the receiver authenticate each other with one shared bearer token (hex, so it fits the services'
+# credential syntax); the file is created once and never rotated by this script.
+ensure_ssh_key_delivery_secret() {
+  local secret_name="$1" file_name="$2" changed="$3"
+  if [ "$changed" = "1" ] && docker_cmd secret inspect "$secret_name" >/dev/null 2>&1; then
+    docker_cmd service rm "${STACK_NAME}_ssh-key-sender" "${STACK_NAME}_ssh-key-receiver" >/dev/null 2>&1 || true
+    docker_cmd secret rm "$secret_name" >/dev/null
+    log "Replaced stale Docker secret: ${secret_name}"
+  fi
+  ensure_docker_secret_from_value "$secret_name" "$(run_root cat "${AI_STAND_SECRETS_DIR}/${file_name}")"
+}
+
+# Delivers each ai-users member's personal SSH private key (an Authentik attribute) to the Coder node (docker/ssh-key-delivery).
+# Issues the sender's Authentik credential and the shared token, creates the secrets and deploys compose.ssh-key-delivery.yaml
+# ALONE into the existing stack. The receiver's node needs the image (images-ai02) and the key directory (host-ai02).
+cmd_configure_ssh_key_delivery() {
+  [ "${SSH_KEY_DELIVERY_ENABLED:-0}" = "1" ] || die "configure-ssh-key-delivery requires SSH_KEY_DELIVERY_ENABLED=1"
+  [ "$NODE_NAME" = "ai01" ] || die "configure-ssh-key-delivery must run on ai01, where Authentik is placed"
+  docker_cmd image inspect "$SSH_KEY_DELIVERY_IMAGE" >/dev/null 2>&1 \
+    || die "Missing image ${SSH_KEY_DELIVERY_IMAGE}; run apply.sh images on ai01 first"
+
+  wait_service_ready "${STACK_NAME}_authentik-server"
+
+  SSH_KEY_DELIVERY_AUTHENTIK_TOKEN_CHANGED=0
+  ensure_ssh_key_delivery_authentik_token
+  load_host_secret ssh-key-delivery-token 32 hex >/dev/null
+  ensure_ssh_key_delivery_secret ai-stand-ssh-key-delivery-authentik-token ssh-key-delivery-authentik-api-token \
+    "$SSH_KEY_DELIVERY_AUTHENTIK_TOKEN_CHANGED"
+  ensure_ssh_key_delivery_secret ai-stand-ssh-key-delivery-token ssh-key-delivery-token 0
+  ensure_ssh_key_delivery_service_accounts
+
+  # The receiver accepts only the service names the sender is configured for.
+  SSH_KEY_DELIVERY_SERVICE_NAMES="$(printf '%s' "$SSH_SERVICE_ACCOUNTS" | tr ',' '\n' | sed -n 's/=.*$//p' | paste -sd, -)"
+  export STACK_NAME SSH_KEY_DELIVERY_IMAGE SSH_KEYS_ROOT SSH_SERVICE_KEYS_ROOT SSH_SERVICE_ACCOUNTS SSH_KEY_DELIVERY_SERVICE_NAMES
+  docker_cmd stack config -c "$COMPOSE_SSH_KEY_DELIVERY_FILE" >/dev/null
+  docker_cmd stack deploy --resolve-image never -c "$COMPOSE_SSH_KEY_DELIVERY_FILE" "$STACK_NAME"
+  wait_service_running_bounded "${STACK_NAME}_ssh-key-sender" 1/1
+  wait_service_running_bounded "${STACK_NAME}_ssh-key-receiver" 1/1
+  log "SSH private-key delivery is running"
+}
+
+# Removes what the host-installed predecessor of this service left behind: a
+# root systemd timer, an immutable source snapshot with its fingerprint
+# machinery, root-only token and state directories, migration backups, and the
+# OpenClaw-era Authentik reader it borrowed. Exact paths only. Refuses to run
+# until the containerized service is up, applying, and has finished a pass.
+cmd_cleanup_legacy_gitea_ssh_sync() {
+  [ "$NODE_NAME" = "ai01" ] || die "cleanup-legacy-gitea-ssh-sync must run on ai01"
+  [ "$(id -u)" -eq 0 ] || die "cleanup-legacy-gitea-ssh-sync must run as root"
+  [ "${GITEA_SSH_SYNC_ENABLED:-0}" = "1" ] || die "cleanup-legacy-gitea-ssh-sync requires GITEA_SSH_SYNC_ENABLED=1"
+  [ "${GITEA_SSH_SYNC_APPLY:-1}" = "1" ] || die "The replacement service only plans (GITEA_SSH_SYNC_APPLY=0); enable it first"
+
+  local service="${STACK_NAME}_gitea-ssh-sync" replicas
+  replicas="$(docker_cmd service ls --filter "name=${service}" --format '{{.Name}} {{.Replicas}}' | awk -v name="$service" '$1 == name { print $2 }')"
+  [ "$replicas" = "1/1" ] || die "The replacement service ${service} is not running (replicas: ${replicas:-none})"
+  # A here-string, not a pipe: grep -q exits on the first match and, with
+  # pipefail, a still-writing producer would turn that into a false failure.
+  local recent
+  recent="$(docker_cmd service logs --tail 50 "$service" 2>&1)"
+  grep -q '"event":"sync".*"mode":"apply"\|"mode":"apply".*"event":"sync"' <<<"$recent" \
+    || die "The replacement service has not completed a synchronization pass in apply mode yet"
+
+  local unit path
+  for unit in ai-stand-gitea-ssh-key-sync.timer ai-stand-gitea-ssh-key-sync.service; do
+    run_root systemctl disable --now "$unit" >/dev/null 2>&1 || true
+    run_root rm -f "/etc/systemd/system/${unit}"
+  done
+  run_root systemctl daemon-reload
+  run_root systemctl reset-failed >/dev/null 2>&1 || true
+  log "Removed the legacy systemd timer and service"
+
+  for path in \
+    /usr/local/libexec/ai-stand/source \
+    "${AI_STAND_DATA_ROOT}/gitea-ssh-sync" \
+    "${STORAGE_ROOT}/gitea-ssh-key-sync-state" \
+    "${AI_STAND_SECRETS_DIR}/gitea-ssh-key-sync"; do
+    if run_root test -e "$path" || run_root test -L "$path"; then
+      run_root rm -rf -- "$path"
+      log "Removed ${path}"
+    fi
+  done
+  if run_root test -e "${AI_STAND_SECRETS_DIR}/openclaw-tenants-authentik-token"; then
+    run_root rm -f -- "${AI_STAND_SECRETS_DIR}/openclaw-tenants-authentik-token"
+    log "Removed the borrowed OpenClaw identity-reader token"
+  fi
+  run_root find "$BACKUP_ROOT" -maxdepth 1 -type f \
+    \( -name 'ai-stand-runtime-source-migration-*.tar.gz' -o -name 'gitea-ssh-sync-config-*.json' \) \
+    -print -delete | sed 's/^/[ai-stand] Removed /'
+
+  local server_container
+  server_container="$(docker_cmd ps --filter "name=${STACK_NAME}_authentik-server." --format '{{.ID}}' | head -n 1 || true)"
+  [ -n "$server_container" ] || die "Cannot find the Authentik server to retire the legacy identity reader"
+  # Only the exact, script-owned account, role and token; anything carrying a
+  # different ownership marker is left alone.
+  docker_cmd exec -i "$server_container" ak shell <<'PYEOF' | sed -n 's/^AI_STAND_LEGACY_READER /[ai-stand] Authentik legacy reader: /p'
+from authentik.core.models import Token, User
+from authentik.rbac.models import Role
+
+name = "ai-stand-openclaw-identity-reader"
+marker = "ai-stand/openclaw-identity-reader/v1"
+user = User.objects.filter(username=name, type="service_account").first()
+if user is not None and (user.attributes or {}).get("ai_stand_openclaw_identity_reader") == marker:
+    Token.objects.including_expired().filter(identifier=name, user=user).delete()
+    user.delete()
+    print("AI_STAND_LEGACY_READER account removed")
+role = Role.objects.filter(name=name, managed=marker).first()
+if role is not None:
+    role.delete()
+    print("AI_STAND_LEGACY_READER role removed")
+print("AI_STAND_LEGACY_READER done")
+PYEOF
+  log "Legacy Gitea SSH-key synchronizer host state removed"
+}
+
+# Deploys the controller and the cert-receiver ALONE into the existing stack, so that the recurring jobs can be rolled out
+# or updated (a new CONTROLLER_IMAGE_VERSION) without a generic `deploy`, which also resets service settings that live
+# only in the running services. A generic deploy includes both services through compose.controller.yaml as well.
+# Needs the controller image on ai01 (and on the receiver's node), the node labels from `host`, and runs on ai01.
+cmd_deploy_controller() {
+  [ "${CONTROLLER_ENABLED:-0}" = "1" ] || die "deploy-controller requires CONTROLLER_ENABLED=1"
+  [ "$NODE_NAME" = "ai01" ] || die "deploy-controller must run on ai01, where the controller is placed"
+  docker_cmd image inspect "$CONTROLLER_IMAGE" >/dev/null 2>&1 \
+    || die "Missing image ${CONTROLLER_IMAGE}; run apply.sh images on ai01 first"
+  local node label label_value
+  for label in ai-stand.controller ai-stand.cert-receiver; do
+    label_value=""
+    for node in $(docker_cmd node ls --format '{{.ID}}'); do
+      if [ "$(docker_cmd node inspect "$node" --format "{{ index .Spec.Labels \"${label}\" }}" 2>/dev/null)" = "true" ]; then
+        label_value="true"
+      fi
+    done
+    if [ "$label" = "ai-stand.controller" ] || [ "${CERTBOT_RECEIVER_ENABLED:-0}" = "1" ]; then
+      [ "$label_value" = "true" ] || die "No Swarm node has the label ${label}=true; run apply.sh host on both nodes first"
+    fi
+  done
+
+  ensure_controller_secrets
+  export_controller_environment
+  export STACK_NAME
+  docker_cmd stack config -c "$COMPOSE_CONTROLLER_FILE" -c "$COMPOSE_CONTROLLER_STANDALONE_FILE" >/dev/null
+  docker_cmd stack deploy --resolve-image never \
+    -c "$COMPOSE_CONTROLLER_FILE" -c "$COMPOSE_CONTROLLER_STANDALONE_FILE" "$STACK_NAME"
+  wait_service_running_bounded "${STACK_NAME}_controller" 1/1
+  if [ "$CONTROLLER_RECEIVER_REPLICAS" != "0" ]; then
+    wait_service_running_bounded "${STACK_NAME}_cert-receiver" "${CONTROLLER_RECEIVER_REPLICAS}/${CONTROLLER_RECEIVER_REPLICAS}"
+  fi
+  log "Controller is running (jobs: ${CONTROLLER_JOBS}; cert-receiver replicas: ${CONTROLLER_RECEIVER_REPLICAS})"
+}
+
+# wait_service_ready waits up to three hours; an optional service that fails to start should fail fast instead.
+wait_service_running_bounded() {
+  local service="$1" expected="$2" replicas
+  local deadline=$(( $(date +%s) + 300 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    replicas="$(docker_cmd service ls --filter "name=${service}" --format '{{.Name}} {{.Replicas}}' | awk -v name="$service" '$1 == name { print $2 }')"
+    if [ "$replicas" = "$expected" ]; then
+      log "Service ready: ${service}"
+      return 0
+    fi
+    sleep 5
+  done
+  docker_cmd service ps "$service" --no-trunc || true
+  die "Service did not become ready within five minutes: ${service}"
+}
+
+# Removes what the host timers of the controller's jobs left behind on THIS node: the three timers and their services,
+# the installed scripts under /usr/local/libexec/ai-stand, the certbot configuration and state, the SSH hand-over key
+# and the forced-command line that accepted it. Exact paths only. Refuses to run until the controller (and, where the
+# profile has one, the cert-receiver) is running and every enabled job has finished successfully at least once.
+cmd_cleanup_legacy_host_timers() {
+  [ "$(id -u)" -eq 0 ] || die "cleanup-legacy-host-timers must run as root"
+  [ "${CONTROLLER_ENABLED:-0}" = "1" ] || die "cleanup-legacy-host-timers requires CONTROLLER_ENABLED=1"
+  local service replicas logs job jobs
+  service="${STACK_NAME}_controller"
+  replicas="$(docker_cmd service ls --filter "name=${service}" --format '{{.Name}} {{.Replicas}}' | awk -v name="$service" '$1 == name { print $2 }')"
+  [ "$replicas" = "1/1" ] || die "The controller ${service} is not running (replicas: ${replicas:-none})"
+  jobs="model-access"
+  [ "${READONLY_MCP_ENABLED:-0}" != "1" ] || jobs="reconcile ${jobs}"
+  [ "${CERTBOT_ENABLED:-0}" != "1" ] || jobs="${jobs} certbot"
+  logs="$(docker_cmd service logs --tail 2000 "$service" 2>&1)"
+  for job in $jobs; do
+    grep -q "\"event\":\"job\",\"exit\":0,\"job\":\"${job}\"" <<<"$logs" \
+      || die "The controller has not completed the ${job} job successfully yet; wait for its first pass"
+  done
+  if [ "${CERTBOT_RECEIVER_ENABLED:-0}" = "1" ]; then
+    replicas="$(docker_cmd service ls --filter "name=${STACK_NAME}_cert-receiver" --format '{{.Name}} {{.Replicas}}' \
+      | awk -v name="${STACK_NAME}_cert-receiver" '$1 == name { print $2 }')"
+    [ "$replicas" = "1/1" ] || die "The cert-receiver is not running (replicas: ${replicas:-none})"
+  fi
+
+  local unit path keys
+  for unit in ai-stand-certbot-renew ai-stand-readonly-mcp-reconciler ai-stand-openwebui-model-access; do
+    run_root systemctl disable --now "${unit}.timer" >/dev/null 2>&1 || true
+    run_root systemctl stop "${unit}.service" >/dev/null 2>&1 || true
+    run_root rm -f "/etc/systemd/system/${unit}.timer" "/etc/systemd/system/${unit}.service"
+  done
+  run_root systemctl daemon-reload
+  run_root systemctl reset-failed >/dev/null 2>&1 || true
+  log "Removed the legacy certbot, reconciler and model-access timers and services"
+
+  for path in \
+    /usr/local/libexec/ai-stand \
+    /etc/ai-stand/certbot.conf \
+    /etc/ai-stand/certbot-peer.known_hosts \
+    /var/lib/ai-stand/certbot \
+    "${AI_STAND_SECRETS_DIR}/certbot-distribute-key" \
+    "${AI_STAND_SECRETS_DIR}/certbot-distribute-key.pub"; do
+    if run_root test -e "$path" || run_root test -L "$path"; then
+      run_root rm -rf -- "$path"
+      log "Removed ${path}"
+    fi
+  done
+  run_root rmdir /etc/ai-stand /var/lib/ai-stand >/dev/null 2>&1 || true
+
+  # The hand-over key was accepted on the other node as a forced command; withdraw that line (a copy is kept).
+  keys="/home/setup/.ssh/authorized_keys"
+  if run_root test -f "$keys" && run_root grep -q 'certbot/receive-cert.sh' "$keys"; then
+    run_root cp -p "$keys" "${keys}.before-controller"
+    run_root sh -c 'grep -v "certbot/receive-cert.sh" "$1" > "$1.new" && chmod --reference="$1" "$1.new" && chown --reference="$1" "$1.new" && mv -f "$1.new" "$1"' sh "$keys"
+    log "Removed the certificate hand-over line from ${keys} (copy: ${keys}.before-controller)"
+  fi
+  log "Legacy host timers of the controller's jobs removed on ${NODE_NAME}"
+}
+
 # Onboards exactly one human into Authentik: creates the account with a
 # freshly generated temporary password (printed once, never persisted) if it
 # doesn't exist yet, and idempotently ensures membership in the requested
 # groups. Never resets the password of an already-existing user - this
 # installation's design is self-service (the user changes their own password
-# and, separately, their own readonly-mcp/GigaCode credentials through
+# and, separately, their own readonly-mcp credentials through
 # Authentik's standard /if/user/ page - see ensureMcpSelfServiceAttributes()
 # in configure.mjs), so a re-run must not clobber a password the user has
 # already changed. Group membership is additive only: this command can add a
@@ -4772,6 +5808,22 @@ ensure_portainer_endpoint() {
   printf '%s\n' "$endpoint_id"
 }
 
+verify_portainer_endpoint() {
+  local jwt="$1" endpoints endpoint_ids endpoint_count
+  endpoints="$(curl \
+    $(portainer_curl_base_args) \
+    --fail \
+    --header "Authorization: Bearer ${jwt}" \
+    "$(portainer_api_url /api/endpoints)")" \
+    || die "Cannot read Portainer endpoints during verification"
+  endpoint_ids="$(jq --compact-output --arg name "$PORTAINER_ENDPOINT_NAME" \
+    '[.[] | select(.Name == $name) | .Id]' <<<"$endpoints")"
+  endpoint_count="$(jq 'length' <<<"$endpoint_ids")"
+  [ "$endpoint_count" = "1" ] \
+    || die "Expected exactly one existing Portainer environment: ${PORTAINER_ENDPOINT_NAME}"
+  jq --raw-output '.[0]' <<<"$endpoint_ids"
+}
+
 ensure_portainer_team() {
   local jwt="$1"
   local teams
@@ -4825,6 +5877,22 @@ ensure_portainer_team() {
   rm -f "$teams" "$payload" "$response"
   log "Portainer OAuth team created: ${PORTAINER_OAUTH_TEAM_NAME} id=${team_id}"
   printf '%s\n' "$team_id"
+}
+
+verify_portainer_team() {
+  local jwt="$1" teams team_ids team_count
+  teams="$(curl \
+    $(portainer_curl_base_args) \
+    --fail \
+    --header "Authorization: Bearer ${jwt}" \
+    "$(portainer_api_url /api/teams)")" \
+    || die "Cannot read Portainer teams during verification"
+  team_ids="$(jq --compact-output --arg name "$PORTAINER_OAUTH_TEAM_NAME" \
+    '[.[] | select(.Name == $name) | .Id]' <<<"$teams")"
+  team_count="$(jq 'length' <<<"$team_ids")"
+  [ "$team_count" = "1" ] \
+    || die "Expected exactly one existing Portainer OAuth team: ${PORTAINER_OAUTH_TEAM_NAME}"
+  jq --raw-output '.[0]' <<<"$team_ids"
 }
 
 ensure_portainer_team_memberships() {
@@ -5548,6 +6616,35 @@ wait_service_ready() {
   die "Service did not become ready: ${service}"
 }
 
+# wait_service_ready only counts replicas. During a stop-first rolling update
+# the replaced task's container can still be listed (and counted) for a few
+# seconds, and a docker exec into it dies with 137 when it stops. Wait until the
+# task Swarm wants running is Running and its local container is healthy.
+wait_local_service_healthy() {
+  local service="$1"
+  local deadline=$(( $(date +%s) + 1800 ))
+  local state container health
+
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    state="$(docker_cmd service ps "$service" --filter desired-state=running --format '{{.CurrentState}}' | head -n 1)"
+    case "$state" in
+      Running*)
+        container="$(local_service_container "$service")"
+        if [ -n "$container" ]; then
+          health="$(docker_cmd inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container" 2>/dev/null || true)"
+          if [ "$health" = "healthy" ] || [ "$health" = "none" ]; then
+            return 0
+          fi
+        fi
+        ;;
+    esac
+    sleep 5
+  done
+
+  docker_cmd service ps "$service" --no-trunc || true
+  die "Service container did not become healthy: ${service}"
+}
+
 service_env_value() {
   local service="$1"
   local key="$2"
@@ -5571,18 +6668,18 @@ effective_service_env_value() {
   fi
 }
 
-effective_lmstudio_model_identifier() {
+effective_llamacpp_model_identifier() {
   effective_service_env_value \
-    "${STACK_NAME}_lmstudio" \
-    LMSTUDIO_MODEL_IDENTIFIER \
-    "$LMSTUDIO_MODEL_IDENTIFIER"
+    "${STACK_NAME}_llamacpp01" \
+    LLAMACPP_MODEL_ID \
+    "$LLAMACPP_MODEL_IDENTIFIER"
 }
 
-effective_lmstudio_embedding_model_identifier() {
+effective_llamacpp_embedding_model_identifier() {
   effective_service_env_value \
-    "${STACK_NAME}_lmstudio" \
-    LMSTUDIO_EMBEDDING_MODEL_IDENTIFIER \
-    "$LMSTUDIO_EMBEDDING_MODEL_IDENTIFIER"
+    "${STACK_NAME}_llamacpp02" \
+    LLAMACPP_MODEL_ID \
+    "$LLAMACPP_EMBEDDING_MODEL_IDENTIFIER"
 }
 
 local_service_container() {
@@ -5600,6 +6697,7 @@ sync_openwebui_persistent_config() {
   fi
 
   wait_service_ready "${STACK_NAME}_openwebui"
+  wait_local_service_healthy "${STACK_NAME}_openwebui"
 
   local openwebui_container
   openwebui_container="$(local_service_container "${STACK_NAME}_openwebui")"
@@ -5614,9 +6712,6 @@ sync_openwebui_persistent_config() {
   local enable_search_query_generation
   local enable_tags_generation
   local enable_title_generation
-  local readonly_mcp_enabled
-  local readonly_mcp_base_url
-  local readonly_mcp_path_prefix
 
   openai_api_configs="$(service_env_value "${STACK_NAME}_openwebui" OPENAI_API_CONFIGS)"
   ollama_base_urls="$(service_env_value "${STACK_NAME}_openwebui" OLLAMA_BASE_URLS)"
@@ -5627,14 +6722,11 @@ sync_openwebui_persistent_config() {
   enable_search_query_generation="$(service_env_value "${STACK_NAME}_openwebui" ENABLE_SEARCH_QUERY_GENERATION)"
   enable_tags_generation="$(service_env_value "${STACK_NAME}_openwebui" ENABLE_TAGS_GENERATION)"
   enable_title_generation="$(service_env_value "${STACK_NAME}_openwebui" ENABLE_TITLE_GENERATION)"
-  readonly_mcp_enabled="$READONLY_MCP_ENABLED"
-  readonly_mcp_base_url="https://${AGENTGATEWAY_HOST}"
-  readonly_mcp_path_prefix="$READONLY_MCP_PATH_PREFIX"
 
   [ -n "$openai_api_configs" ] || openai_api_configs="{}"
   [ -n "$ollama_base_urls" ] || ollama_base_urls=""
   [ -n "$ollama_api_configs" ] || ollama_api_configs="{}"
-  [ -n "$rag_embedding_model" ] || rag_embedding_model="$LMSTUDIO_EMBEDDING_MODEL_IDENTIFIER"
+  [ -n "$rag_embedding_model" ] || rag_embedding_model="$LLAMACPP_EMBEDDING_MODEL_IDENTIFIER"
   [ -n "$enable_follow_up_generation" ] || enable_follow_up_generation="False"
   [ -n "$enable_retrieval_query_generation" ] || enable_retrieval_query_generation="False"
   [ -n "$enable_search_query_generation" ] || enable_search_query_generation="False"
@@ -5646,10 +6738,7 @@ sync_openwebui_persistent_config() {
   local output
   output="$(
     local -x OPENAI_API_CONFIGS="$openai_api_configs"
-    local -x READONLY_MCP_ENABLED="$readonly_mcp_enabled"
-    local -x READONLY_MCP_BASE_URL="$readonly_mcp_base_url"
-    local -x READONLY_MCP_PATH_PREFIX="$readonly_mcp_path_prefix"
-    docker_cmd exec -e OPENAI_API_CONFIGS -e READONLY_MCP_ENABLED -e READONLY_MCP_BASE_URL -e READONLY_MCP_PATH_PREFIX -i "$openwebui_container" python - \
+    docker_cmd exec -e OPENAI_API_CONFIGS -i "$openwebui_container" python - \
       "$ollama_base_urls" \
       "$ollama_api_configs" \
       "$rag_embedding_model" \
@@ -5677,9 +6766,6 @@ enable_search_query_generation = sys.argv[6]
 enable_tags_generation = sys.argv[7]
 enable_title_generation = sys.argv[8]
 default_models = sys.argv[9]
-readonly_mcp_enabled = os.environ.get("READONLY_MCP_ENABLED", "0").strip() == "1"
-readonly_mcp_base_url = os.environ.get("READONLY_MCP_BASE_URL", "").rstrip("/")
-readonly_mcp_path_prefix = os.environ.get("READONLY_MCP_PATH_PREFIX", "/mcp/work").rstrip("/")
 
 db_path = "/app/backend/data/webui.db"
 now = int(time.time())
@@ -5729,43 +6815,6 @@ desired = {
     "ui.default_models": default_models,
 }
 
-managed_mcp_ids = {
-    "ai-stand-mcp-jira",
-    "ai-stand-mcp-confluence",
-    "ai-stand-mcp-imap",
-    "ai-stand-mcp-personal",
-}
-
-def managed_mcp_connections():
-    if not readonly_mcp_enabled:
-        return []
-    # Authentik does not implement DCR. Agentgateway's `authentik` adapter
-    # answers registration with the one public PKCE client instead, which is
-    # safe for both Open WebUI and OpenClaw because no client secret is
-    # involved. Each human grant remains encrypted in that user's Open WebUI
-    # OAuth session, never in this global connection definition.
-    return [
-        {
-            "type": "mcp",
-            "url": f"{readonly_mcp_base_url}{path}",
-            "auth_type": "oauth_2.1",
-            "config": {"enable": True, "access_grants": [], "function_name_filter_list": ""},
-            "info": {
-                "id": identifier,
-                "name": name,
-                "description": description,
-                "oauth_scope": "openid profile email groups",
-                "oauth_resource_parameter": "auto",
-            },
-        }
-        for identifier, name, description, path in (
-            ("ai-stand-mcp-jira", "Jira (read-only)", "Personal Jira Data Center read-only tools", f"{readonly_mcp_path_prefix}/jira-readonly-mcp"),
-            ("ai-stand-mcp-confluence", "Confluence (read-only)", "Personal Confluence Data Center read-only tools", f"{readonly_mcp_path_prefix}/confluence-readonly-mcp"),
-            ("ai-stand-mcp-imap", "IMAP (read-only)", "Personal IMAP read-only tools", f"{readonly_mcp_path_prefix}/imap-readonly-mcp"),
-            ("ai-stand-mcp-personal", "Personal MCP", "Personal MetaMCP namespace", "/mcp/personal"),
-        )
-    ]
-
 changed = False
 with sqlite3.connect(db_path, timeout=30) as con:
     cur = con.cursor()
@@ -5786,31 +6835,6 @@ with sqlite3.connect(db_path, timeout=30) as con:
                 (value, now, key),
             )
             changed = True
-    row = cur.execute("select value from config where key = ?", ("tool_server.connections",)).fetchone()
-    try:
-        existing_connections = json.loads(row[0]) if row else []
-    except (TypeError, json.JSONDecodeError):
-        existing_connections = []
-    if not isinstance(existing_connections, list):
-        existing_connections = []
-    unmanaged_connections = [
-        entry for entry in existing_connections
-        if not isinstance(entry, dict) or (entry.get("info") or {}).get("id") not in managed_mcp_ids
-    ]
-    connections = unmanaged_connections + managed_mcp_connections()
-    serialized_connections = stable_json(connections)
-    if row is None:
-        cur.execute(
-            "insert into config (key, value, updated_at) values (?, ?, ?)",
-            ("tool_server.connections", serialized_connections, now),
-        )
-        changed = True
-    elif row[0] != serialized_connections:
-        cur.execute(
-            "update config set value = ?, updated_at = ? where key = ?",
-            (serialized_connections, now, "tool_server.connections"),
-        )
-        changed = True
     con.commit()
 
 print("changed=true" if changed else "changed=false")
@@ -5822,130 +6846,176 @@ PY
     log "Restarting Open WebUI to pick up persistent config changes"
     docker_cmd service update --force --detach=true "${STACK_NAME}_openwebui" >/dev/null
     wait_service_ready "${STACK_NAME}_openwebui"
+    wait_local_service_healthy "${STACK_NAME}_openwebui"
   fi
 
-  sync_openwebui_gigacode_pipe
+  sync_openwebui_tool_servers
+  sync_openwebui_model_access
 }
 
-# Open WebUI's built-in OpenAI connection is intentionally a machine-token
-# connection.  It cannot carry a human `sub`, so a personal subscription must
-# be a managed Pipe instead.  The Pipe source is copied into the running
-# container only for this idempotent database upsert; it is persisted as the
-# Function's content and the temporary file is removed before returning.
-sync_openwebui_gigacode_pipe() {
-  if [ "${NODE_NAME:-}" != "ai01" ]; then
-    return 0
-  fi
+# Open WebUI runs with ENABLE_PERSISTENT_CONFIG=False, so it reads its tool
+# servers only from TOOL_SERVER_CONNECTIONS; rows written to its database are
+# ignored. Each connection needs an encrypted OAuth client blob
+# (info.oauth_client_info). It is produced by the same registration code the
+# admin UI calls, then encrypted with the key Open WebUI derives from its own
+# secret. Fernet output is not deterministic, so a blob that still decrypts to
+# the expected client is reused; otherwise every apply would restart Open WebUI.
+# Authentik has no dynamic client registration: Agentgateway's `authentik`
+# adapter answers it with the one pre-registered public PKCE client, which is
+# safe for every consumer because no client secret is involved. Each person's
+# own grant stays encrypted in that user's Open WebUI OAuth session. Access
+# stays enforced at Agentgateway ('ai-users' in jwt.groups plus the per-user
+# target rule), so the connections themselves are readable by every user.
+sync_openwebui_tool_servers() {
+  [ "${NODE_NAME:-}" = "ai01" ] || return 0
 
-  local openwebui_container
+  local openwebui_container current output desired note
+  wait_local_service_healthy "${STACK_NAME}_openwebui"
   openwebui_container="$(local_service_container "${STACK_NAME}_openwebui")"
   [ -n "$openwebui_container" ] || die "Open WebUI task is not running locally on ai01"
+  current="$(service_env_value "${STACK_NAME}_openwebui" TOOL_SERVER_CONNECTIONS)"
+  [ -n "$current" ] || current="[]"
 
-  if [ "$GIGACODE_SUBSCRIPTION_ENABLED" != "1" ]; then
-    local removed
-    removed="$(docker_cmd exec -i "$openwebui_container" python - <<'PY'
-import sqlite3
-
-with sqlite3.connect("/app/backend/data/webui.db", timeout=30) as con:
-    try:
-        cur = con.execute('delete from "function" where id = ?', ("ai_stand_gigacode_subscription",))
-    except sqlite3.OperationalError:
-        cur = None
-    con.commit()
-print("changed=true" if cur and cur.rowcount else "changed=false")
-PY
-)"
-    if printf '%s\n' "$removed" | grep -q 'changed=true'; then
-      docker_cmd service update --force --detach=true "${STACK_NAME}_openwebui" >/dev/null
-      wait_service_ready "${STACK_NAME}_openwebui"
-    fi
-    return 0
-  fi
-
-  [ -r "$OPENWEBUI_GIGACODE_PIPE_SOURCE" ] \
-    || die "Managed GigaCode Pipe source is missing: ${OPENWEBUI_GIGACODE_PIPE_SOURCE}"
-  docker_cmd cp "$OPENWEBUI_GIGACODE_PIPE_SOURCE" "${openwebui_container}:/tmp/ai-stand-gigacode-subscription-pipe.py"
-
-  local output
-  output="$(docker_cmd exec -i "$openwebui_container" python - <<'PY'
-import hashlib
+  output="$(
+    local -x CURRENT_TOOL_SERVER_CONNECTIONS="$current"
+    local -x READONLY_MCP_ENABLED="$READONLY_MCP_ENABLED"
+    local -x READONLY_MCP_BASE_URL="https://${AGENTGATEWAY_HOST}"
+    local -x READONLY_MCP_PATH_PREFIX="$READONLY_MCP_PATH_PREFIX"
+    docker_cmd exec -e CURRENT_TOOL_SERVER_CONNECTIONS -e READONLY_MCP_ENABLED -e READONLY_MCP_BASE_URL -e READONLY_MCP_PATH_PREFIX \
+      -i "$openwebui_container" python - <<'PY'
+import asyncio
 import json
-import sqlite3
-import time
-from pathlib import Path
+import os
+import sys
+import types
 
-function_id = "ai_stand_gigacode_subscription"
-source_path = Path("/tmp/ai-stand-gigacode-subscription-pipe.py")
+# docker exec sees the container definition, not start.sh's exported process
+# environment: read the signing secret the same way start.sh does.
+if not os.environ.get("WEBUI_SECRET_KEY"):
+    with open("/run/secrets/ai-stand-openwebui-secret-key", encoding="utf-8") as handle:
+        os.environ["WEBUI_SECRET_KEY"] = handle.read().rstrip("\n")
+sys.path.insert(0, "/app/backend")
+
+enabled = os.environ.get("READONLY_MCP_ENABLED", "0").strip() == "1"
+base_url = os.environ.get("READONLY_MCP_BASE_URL", "").rstrip("/")
+prefix = os.environ.get("READONLY_MCP_PATH_PREFIX", "/mcp/work").rstrip("/")
+webui_url = os.environ["WEBUI_URL"].rstrip("/")
+scope = "openid profile email groups"
+
 try:
-    content = source_path.read_text(encoding="utf-8")
-finally:
-    source_path.unlink(missing_ok=True)
-if not content.strip():
-    raise SystemExit("managed GigaCode Pipe source is empty")
+    current = json.loads(os.environ.get("CURRENT_TOOL_SERVER_CONNECTIONS") or "[]")
+except json.JSONDecodeError:
+    current = []
+if not isinstance(current, list):
+    current = []
 
-metadata = json.dumps({
-    "manifest": {
-        "title": "gigacode",
-        "description": "Personal GigaCode subscription",
-        "version": "1.0.0",
-    },
-    "ai_stand_managed": True,
-}, ensure_ascii=False, separators=(",", ":"))
-now = int(time.time())
-desired = {
-    "id": function_id,
-    # `pipe` discovery is global in Open WebUI independently of this field.
-    # Keep a managed integration ownerless rather than impersonating a human
-    # account or making it a global filter/action.
-    "user_id": None,
-    "name": "gigacode",
-    "type": "pipe",
-    "content": content,
-    "meta": metadata,
-    "valves": "{}",
-    "is_active": 1,
-    "is_global": 0,
-    "updated_at": now,
-    "created_at": now,
+
+def entry_id(entry):
+    return (entry.get("info") or {}).get("id") if isinstance(entry, dict) else None
+
+
+servers = (
+    ("ai-stand-mcp-jira", "Jira (read-only)", "Personal Jira Data Center read-only tools", f"{prefix}/jira-readonly-mcp"),
+    ("ai-stand-mcp-confluence", "Confluence (read-only)", "Personal Confluence Data Center read-only tools", f"{prefix}/confluence-readonly-mcp"),
+    ("ai-stand-mcp-imap", "IMAP (read-only)", "Personal IMAP read-only tools", f"{prefix}/imap-readonly-mcp"),
+)
+managed = {identifier for identifier, *_ in servers}
+retired = {"ai-stand-mcp-personal"}
+unmanaged = [entry for entry in current if entry_id(entry) not in managed | retired]
+existing = {entry_id(entry): entry for entry in current if entry_id(entry) in managed}
+
+desired = []
+if enabled:
+    from open_webui.utils.oauth import (
+        decrypt_data,
+        encrypt_data,
+        get_oauth_client_info_with_dynamic_client_registration,
+    )
+
+    request = types.SimpleNamespace(base_url=webui_url + "/")
+
+    def reusable(entry, url, client_id):
+        if not isinstance(entry, dict) or entry.get("url") != url:
+            return None
+        blob = (entry.get("info") or {}).get("oauth_client_info") or ""
+        try:
+            data = decrypt_data(blob)
+        except Exception:
+            return None
+        redirect = [f"{webui_url}/oauth/clients/{client_id}/callback"]
+        if data.get("client_id") and data.get("scope") == scope and data.get("redirect_uris") == redirect:
+            return blob
+        return None
+
+    for identifier, name, description, path in servers:
+        client_id = f"mcp:{identifier}"
+        url = base_url + path
+        previous = existing.get(identifier)
+        blob = reusable(previous, url, client_id)
+        if blob is None:
+            try:
+                info = asyncio.run(get_oauth_client_info_with_dynamic_client_registration(
+                    request, client_id, url, oauth_scope=scope))
+                blob = encrypt_data(info.model_dump(mode="json"))
+            except Exception as error:
+                # Not fatal: Agentgateway or Authentik may not be configured yet
+                # on a fresh deployment. A later run fills the connection in.
+                print(f"MCP-NOTE: OAuth client registration failed for {identifier}: {type(error).__name__}")
+                if isinstance(previous, dict):
+                    desired.append(previous)
+                continue
+        desired.append({
+            "type": "mcp",
+            "url": url,
+            "path": "",
+            "auth_type": "oauth_2.1",
+            "key": "",
+            "config": {
+                "enable": True,
+                "function_name_filter_list": "",
+                "access_grants": [{"principal_type": "user", "principal_id": "*", "permission": "read"}],
+            },
+            "info": {
+                "id": identifier,
+                "name": name,
+                "description": description,
+                "oauth_scope": scope,
+                "oauth_resource_parameter": "auto",
+                "oauth_client_info": blob,
+            },
+        })
+
+print(json.dumps(unmanaged + desired, ensure_ascii=False, separators=(",", ":")))
+PY
+  )"
+
+  desired="$(printf '%s\n' "$output" | tail -n 1)"
+  while IFS= read -r note; do
+    [ -n "$note" ] && warn "${note#MCP-NOTE: }"
+  done < <(printf '%s\n' "$output" | grep '^MCP-NOTE: ' || true)
+  printf '%s' "$desired" | jq -e 'type == "array"' >/dev/null \
+    || die "Could not build the Open WebUI tool server connections"
+
+  update_service_env openwebui "TOOL_SERVER_CONNECTIONS=${desired}"
 }
 
-with sqlite3.connect("/app/backend/data/webui.db", timeout=30) as con:
-    con.execute("begin immediate")
-    columns = {row[1] for row in con.execute('pragma table_info("function")')}
-    if not columns or "id" not in columns:
-        raise SystemExit("Open WebUI function table is unavailable")
-    row = con.execute('select * from "function" where id = ?', (function_id,)).fetchone()
-    usable = {key: value for key, value in desired.items() if key in columns}
-    if row is None:
-        fields = list(usable)
-        con.execute(
-            'insert into "function" ({}) values ({})'.format(
-                ",".join('"' + key + '"' for key in fields), ",".join("?" for _ in fields)
-            ),
-            tuple(usable[key] for key in fields),
-        )
-        changed = True
-    else:
-        existing = dict(zip([item[1] for item in con.execute('pragma table_info("function")')], row))
-        updates = {key: value for key, value in usable.items() if key not in {"id", "created_at"} and existing.get(key) != value}
-        if updates:
-            fields = list(updates)
-            con.execute(
-                'update "function" set {} where id = ?'.format(",".join('"' + key + '" = ?' for key in fields)),
-                tuple(updates[key] for key in fields) + (function_id,),
-            )
-        changed = bool(updates)
-    con.commit()
+# The recurring reconciliation runs as the `model-access` job of the controller container; this only writes the
+# identity configuration it reads.
+install_openwebui_model_access() {
+  [ "${NODE_NAME:-}" = "ai01" ] || return 0
+  [ "${OPENWEBUI_MODEL_ACCESS_SKIP_INSTALL:-0}" != "1" ] || return 0
+  run_root install -d -m 0700 -o root -g root "$AI_STAND_DATA_ROOT" "${AI_STAND_DATA_ROOT}/identity"
+  run_root python3 "${OPENWEBUI_MODEL_ACCESS_SOURCE_DIR}/model_access_snapshot.py" \
+    --install-config --authentik-address "https://${AUTHENTIK_HOST}"
+}
 
-print("changed=true" if changed else "changed=false")
-print("sha256=" + hashlib.sha256(content.encode("utf-8")).hexdigest())
-PY
-)"
-  log "Open WebUI managed GigaCode Pipe sync: $(printf '%s\n' "$output" | head -n 1)"
-  if printf '%s\n' "$output" | grep -q 'changed=true'; then
-    docker_cmd service update --force --detach=true "${STACK_NAME}_openwebui" >/dev/null
-    wait_service_ready "${STACK_NAME}_openwebui"
-  fi
+sync_openwebui_model_access() {
+  [ "${NODE_NAME:-}" = "ai01" ] || return 0
+  wait_local_service_healthy "${STACK_NAME}_openwebui"
+  install_openwebui_model_access
+  ensure_readonly_mcp_authentik_service_token
+  run_root python3 "${OPENWEBUI_MODEL_ACCESS_SOURCE_DIR}/model_access_snapshot.py" \
+    --config "$OPENWEBUI_MODEL_ACCESS_CONFIG" --apply
 }
 
 check_openwebui_persistent_config() {
@@ -5984,7 +7054,7 @@ check_openwebui_persistent_config() {
 
   [ -n "$openai_api_configs" ] || openai_api_configs="{}"
   [ -n "$ollama_api_configs" ] || ollama_api_configs="{}"
-  [ -n "$rag_embedding_model" ] || rag_embedding_model="$LMSTUDIO_EMBEDDING_MODEL_IDENTIFIER"
+  [ -n "$rag_embedding_model" ] || rag_embedding_model="$LLAMACPP_EMBEDDING_MODEL_IDENTIFIER"
   [ -n "$enable_follow_up_generation" ] || enable_follow_up_generation="False"
   [ -n "$enable_retrieval_query_generation" ] || enable_retrieval_query_generation="False"
   [ -n "$enable_search_query_generation" ] || enable_search_query_generation="False"
@@ -5996,7 +7066,10 @@ check_openwebui_persistent_config() {
     local -x READONLY_MCP_ENABLED="$readonly_mcp_enabled"
     local -x READONLY_MCP_BASE_URL="$readonly_mcp_base_url"
     local -x READONLY_MCP_PATH_PREFIX="$readonly_mcp_path_prefix"
-    docker_cmd exec -e OPENAI_API_CONFIGS -e READONLY_MCP_ENABLED -e READONLY_MCP_BASE_URL -e READONLY_MCP_PATH_PREFIX -i "$openwebui_container" python - \
+    local -x TOOL_SERVER_CONNECTIONS
+    TOOL_SERVER_CONNECTIONS="$(service_env_value "${STACK_NAME}_openwebui" TOOL_SERVER_CONNECTIONS)"
+    docker_cmd exec -e OPENAI_API_CONFIGS -e READONLY_MCP_ENABLED -e READONLY_MCP_BASE_URL -e READONLY_MCP_PATH_PREFIX -e TOOL_SERVER_CONNECTIONS \
+      -i "$openwebui_container" python - \
       "$ollama_api_configs" \
       "$rag_embedding_model" \
       "$enable_follow_up_generation" \
@@ -6024,7 +7097,7 @@ readonly_mcp_path_prefix = os.environ.get("READONLY_MCP_PATH_PREFIX", "/mcp/work
 
 with sqlite3.connect("/app/backend/data/webui.db", timeout=30) as con:
     rows = dict(con.execute(
-        "select key, value from config where key in (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "select key, value from config where key in (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "openai.api_configs",
             "ollama.enable",
@@ -6035,7 +7108,6 @@ with sqlite3.connect("/app/backend/data/webui.db", timeout=30) as con:
             "task.query.search.enable",
             "task.tags.enable",
             "task.title.enable",
-            "tool_server.connections",
         ),
     ).fetchall())
 
@@ -6058,32 +7130,40 @@ if rows.get("task.tags.enable") != expected_tags:
     errors.append("task.tags.enable")
 if rows.get("task.title.enable") != expected_title:
     errors.append("task.title.enable")
+# Open WebUI ignores database config (ENABLE_PERSISTENT_CONFIG=False): tool
+# servers live in the TOOL_SERVER_CONNECTIONS environment of the service.
 try:
-    connections = json.loads(rows.get("tool_server.connections", "[]"))
+    connections = json.loads(os.environ.get("TOOL_SERVER_CONNECTIONS") or "[]")
 except json.JSONDecodeError:
     connections = None
 if not isinstance(connections, list):
-    errors.append("tool_server.connections")
+    errors.append("TOOL_SERVER_CONNECTIONS")
 else:
     expected = {
         "ai-stand-mcp-jira": f"{readonly_mcp_path_prefix}/jira-readonly-mcp",
         "ai-stand-mcp-confluence": f"{readonly_mcp_path_prefix}/confluence-readonly-mcp",
         "ai-stand-mcp-imap": f"{readonly_mcp_path_prefix}/imap-readonly-mcp",
-        "ai-stand-mcp-personal": "/mcp/personal",
     }
     actual = {
         (entry.get("info") or {}).get("id"): entry
         for entry in connections if isinstance(entry, dict)
-        and (entry.get("info") or {}).get("id") in expected
+        and ((entry.get("info") or {}).get("id") in expected or (entry.get("info") or {}).get("id") == "ai-stand-mcp-personal")
     }
     if readonly_mcp_enabled:
         for identifier, path in expected.items():
             connection = actual.get(identifier)
-            if not isinstance(connection, dict) or connection.get("type") != "mcp" or connection.get("auth_type") != "oauth_2.1" or connection.get("url") != readonly_mcp_base_url + path:
-                errors.append("tool_server.connections")
+            info = (connection or {}).get("info") or {}
+            if (not isinstance(connection, dict) or connection.get("type") != "mcp"
+                    or connection.get("auth_type") != "oauth_2.1"
+                    or connection.get("url") != readonly_mcp_base_url + path
+                    or not info.get("oauth_client_info")
+                    or not (connection.get("config") or {}).get("access_grants")):
+                errors.append("TOOL_SERVER_CONNECTIONS")
                 break
+        if "ai-stand-mcp-personal" in actual:
+            errors.append("TOOL_SERVER_CONNECTIONS")
     elif actual:
-        errors.append("tool_server.connections")
+        errors.append("TOOL_SERVER_CONNECTIONS")
 
 if errors:
     raise SystemExit("Open WebUI persistent config drift: " + ", ".join(errors))
@@ -6091,6 +7171,52 @@ PY
   )
 
   log "Open WebUI persistent config matches service environment"
+}
+
+# The recurring jobs run in the controller container (docker/controller); its healthcheck turns unhealthy when the job
+# loop stops beating. The host keeps only the path unit that reloads nginx after a certificate change.
+check_controller() {
+  [ "${CONTROLLER_ENABLED:-0}" = "1" ] || return 0
+  local service container health
+  if [ "${CERTBOT_ENABLED:-0}" = "1" ]; then
+    run_root systemctl is-active --quiet ai-stand-nginx-reload.path \
+      || die "ai-stand-nginx-reload.path is not active; a renewed certificate would not be reloaded (run apply.sh host)"
+  fi
+  service=""
+  if [ "$NODE_NAME" = "ai01" ]; then
+    service="${STACK_NAME}_controller"
+  elif [ "$NODE_NAME" = "ai02" ] && [ "${CERTBOT_RECEIVER_ENABLED:-0}" = "1" ]; then
+    service="${STACK_NAME}_cert-receiver"
+  fi
+  [ -n "$service" ] || return 0
+  container="$(local_service_container "$service")"
+  [ -n "$container" ] || die "${service} is not running locally on ${NODE_NAME}"
+  health="$(docker_cmd inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")"
+  [ "$health" = "healthy" ] || die "${service} is ${health}, not healthy"
+  log "Controller ok: ${service} (${health})"
+}
+
+# The sender (Authentik node) and the receiver (Coder node) report healthy only while they work: the sender's heartbeat
+# follows a successful pass, the receiver's healthcheck is its own HTTP endpoint. The key directory must be private.
+check_ssh_key_delivery() {
+  [ "${SSH_KEY_DELIVERY_ENABLED:-0}" = "1" ] || return 0
+  local service container health
+  case "$NODE_NAME" in
+    ai01) service="${STACK_NAME}_ssh-key-sender" ;;
+    ai02) service="${STACK_NAME}_ssh-key-receiver" ;;
+    *) return 0 ;;
+  esac
+  container="$(local_service_container "$service")"
+  [ -n "$container" ] || die "${service} is not running locally on ${NODE_NAME}"
+  health="$(docker_cmd inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container")"
+  [ "$health" = "healthy" ] || die "${service} is ${health}, not healthy"
+  if [ "$NODE_NAME" = "ai02" ]; then
+    [ "$(run_root stat -c '%a:%u:%g' "$SSH_KEYS_ROOT")" = "700:${APP_UID}:${APP_GID}" ] \
+      || die "${SSH_KEYS_ROOT} must be mode 0700 owned by ${APP_UID}:${APP_GID}"
+    [ "$(run_root stat -c '%a:%u:%g' "$SSH_SERVICE_KEYS_ROOT")" = "700:${APP_UID}:${APP_GID}" ] \
+      || die "${SSH_SERVICE_KEYS_ROOT} must be mode 0700 owned by ${APP_UID}:${APP_GID}"
+  fi
+  log "SSH key delivery ok: ${service} (${health})"
 }
 
 check_readonly_mcp_configuration() {
@@ -6103,11 +7229,6 @@ check_readonly_mcp_configuration() {
     || die "Read-only MCP manifest is missing: $READONLY_MCP_MANIFEST"
   [ "$(run_root stat -c '%U:%G:%a' "$READONLY_MCP_RECONCILER_CONFIG")" = "root:root:600" ] \
     || die "Read-only MCP reconciler configuration must be root:root mode 0600"
-  run_root systemctl is-enabled --quiet ai-stand-readonly-mcp-reconciler.timer \
-    || die "Read-only MCP reconciler timer is not enabled"
-  run_root systemctl is-active --quiet ai-stand-readonly-mcp-reconciler.timer \
-    || die "Read-only MCP reconciler timer is not active"
-
   local -a mcp_services=()
   local service_list
   service_list="$(mktemp)"
@@ -6128,14 +7249,11 @@ for user in manifest["users"]:
     services = user.get("services", {})
     if not isinstance(services, dict):
         raise SystemExit("unsafe services entry")
-    for kind in ("jira", "confluence", "imap", "gigacode"):
+    for kind in ("jira", "confluence", "imap"):
         if kind in services:
             if not isinstance(services[kind], dict):
                 raise SystemExit("unsafe service entry")
-            if kind == "gigacode":
-                print(f"gigacode-subscription-bridge-{user['slug']}")
-            else:
-                print(f"{kind}-readonly-mcp-{user['slug']}")
+            print(f"{kind}-readonly-mcp-{user['slug']}")
 PY
   then
     rm -f "$service_list"
@@ -6158,7 +7276,7 @@ PY
     case "$service_ports" in ""|null) ;; *) die "Read-only MCP service ${service} must not publish ports" ;; esac
   done
 
-  log "Read-only MCP reconciler/timer and ${#mcp_services[@]} active services verified"
+  log "Read-only MCP reconciler configuration and ${#mcp_services[@]} active services verified"
 }
 
 check_agentgateway_database() {
@@ -6255,132 +7373,52 @@ check_service_label_placement() {
   log "Placement ok: ${service} on ${node} (${label}=true)"
 }
 
-# openclaw-sandbox-dind is not a Swarm service (see
-# ensure_openclaw_sandbox_dind_service), so it has no placement label to
-# check via check_service_label_placement - this is the host-local
-# equivalent, confirming the systemd unit is up and, specifically, that the
-# container actually got the privileged mode a Swarm-managed task never
-# could (the exact failure this whole host-level design works around).
-check_openclaw_sandbox_dind_host_service() {
-  run_root systemctl is-active --quiet ai-stand-openclaw-sandbox-dind.service \
-    || die "ai-stand-openclaw-sandbox-dind.service is not active"
-
-  local privileged
-  privileged="$(docker_cmd inspect ai-stand-openclaw-sandbox-dind --format '{{.HostConfig.Privileged}}' 2>/dev/null || true)"
-  [ "$privileged" = "true" ] \
-    || die "openclaw-sandbox-dind container is not privileged (got: '${privileged:-<not found>}')"
-
-  log "openclaw-sandbox-dind host service is active and privileged"
-}
-
-check_coder_rootless_docker_service() {
-  [ "$CODER_ENABLED" = "1" ] || return 0
-  [ "$NODE_NAME" = "ai02" ] || return 0
-  run_root systemctl is-active --quiet ai-stand-coder-rootless-docker.service \
-    || die "ai-stand-coder-rootless-docker.service is not active"
-  run_root test -S "$CODER_ROOTLESS_DOCKER_SOCKET" \
-    || die "Coder rootless Docker socket is missing"
-  run_root sudo -u "$CODER_RUNTIME_USER" env \
-    HOME="$CODER_PROVISIONER_HOME" \
-    XDG_RUNTIME_DIR="$CODER_PROVISIONER_RUNTIME" \
-    DOCKER_HOST="unix://${CODER_ROOTLESS_DOCKER_SOCKET}" \
-    docker info --format '{{.SecurityOptions}}' | grep -qi rootless \
-    || die "Coder Docker endpoint is not rootless"
-  run_root sudo -u "$CODER_RUNTIME_USER" env \
-    HOME="$CODER_PROVISIONER_HOME" \
-    XDG_RUNTIME_DIR="$CODER_PROVISIONER_RUNTIME" \
-    DOCKER_HOST="unix://${CODER_ROOTLESS_DOCKER_SOCKET}" \
-    docker network inspect "$CODER_WORKSPACE_NETWORK" >/dev/null \
-    || die "Coder workspace network ${CODER_WORKSPACE_NETWORK} is missing"
-  log "Coder isolated rootless Docker daemon is active"
-}
-
-# The Gateway talks to a remote Docker daemon in openclaw-sandbox-dind. Its
-# bind-mount source paths must therefore exist inside that daemon too. Only
-# the sandbox workspace root crosses this boundary: credentials and the rest
-# of Gateway's /home/ai remain inaccessible to DIND.
-check_openclaw_sandbox_workspace_bridge() {
-  local workspace_mount
-  local workspace_stat
-  local probe_dir
-  local probe_name
-  local probe_file
-
-  workspace_mount="$(docker_cmd inspect ai-stand-openclaw-sandbox-dind --format '{{range .Mounts}}{{if eq .Destination "/home/ai/.openclaw/sandboxes"}}{{.Source}}:{{.RW}}{{end}}{{end}}' 2>/dev/null || true)"
-  [ "$workspace_mount" = "${OPENCLAW_SANDBOX_WORKSPACE_ROOT}:true" ] \
-    || die "openclaw-sandbox-dind is missing the required rw sandbox workspace mount (got: '${workspace_mount:-<none>}')"
-
-  workspace_stat="$(docker_cmd exec ai-stand-openclaw-sandbox-dind stat -c '%u:%g:%a' /home/ai/.openclaw/sandboxes 2>/dev/null || true)"
-  [ "$workspace_stat" = "${APP_UID}:${APP_GID}:750" ] \
-    || die "Sandbox workspace root has unexpected ownership or mode inside DIND: '${workspace_stat:-<missing>}' (expected ${APP_UID}:${APP_GID}:750)"
-
-  probe_dir="$(run_root mktemp -d "${OPENCLAW_SANDBOX_WORKSPACE_ROOT}/.ai-stand-write-probe.${RUN_TS}.XXXXXX")"
-  probe_name="${probe_dir##*/}"
-  probe_file="${probe_dir}/.ai-stand-write-probe"
-  run_root chown "$APP_UID:$APP_GID" "$probe_dir"
-  run_root chmod 0750 "$probe_dir"
-
-  if ! docker_cmd exec ai-stand-openclaw-sandbox-dind docker run --rm \
-    --user "${APP_UID}:${APP_GID}" \
-    --network none \
-    -v "/home/ai/.openclaw/sandboxes/${probe_name}:/workspace:rw" \
-    "$OPENCLAW_SANDBOX_IMAGE" \
-    sh -ceu 'test -w /workspace && touch /workspace/.ai-stand-write-probe'; then
-    run_root rmdir "$probe_dir" >/dev/null 2>&1 || true
-    die "Sandbox workspace write probe failed; retained non-empty probe directory if diagnostics are needed: ${probe_dir}"
-  fi
-
-  if ! run_root test -f "$probe_file"; then
-    run_root rmdir "$probe_dir" >/dev/null 2>&1 || true
-    die "Sandbox workspace write probe did not appear on the host: ${probe_file}"
-  fi
-
-  run_root rm -f -- "$probe_file"
-  run_root rmdir -- "$probe_dir" \
-    || die "Sandbox workspace write probe cleanup refused because ${probe_dir} is unexpectedly non-empty"
-  log "OpenClaw sandbox workspace bridge is writable as ${APP_UID}:${APP_GID}"
-}
-
-# check_openclaw_sandbox_dind_host_service only proves the dind sidecar
-# itself is healthy - it says nothing about whether openclaw-gateway can
-# actually drive it. That gap is exactly how the "docker" CLI going missing
-# from the gateway image (see docker/openclaw/Dockerfile) shipped unnoticed:
-# DOCKER_HOST pointed at a live, privileged, reachable daemon the whole time,
-# but every sandbox operation failed before it ever got there (spawn docker
-# ENOENT). Exec into the running gateway container as the "ai" user (the
-# user the gateway process itself runs as) and force a real round trip to
-# the daemon over DOCKER_HOST, not just confirm a binary exists on disk.
-check_openclaw_gateway_docker_cli() {
+check_openclaw_docker_sandbox_configuration() {
   local container_id
-  local server_version
-
   container_id="$(local_service_container "${STACK_NAME}_openclaw-gateway")"
   [ -n "$container_id" ] || die "openclaw-gateway task is not running locally on ${NODE_NAME}"
 
-  server_version="$(docker_cmd exec -u ai "$container_id" docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
-  [ -n "$server_version" ] \
-    || die "openclaw-gateway (container ${container_id}) cannot invoke docker against the sandbox dind daemon over \$DOCKER_HOST - check that the docker CLI is installed in the image and DOCKER_HOST is reachable"
+  docker_cmd exec -u ai "$container_id" sh -ceu '
+    test "${DOCKER_HOST:-}" = "tcp://docker-socket-proxy-openclaw:2375"
+    command -v docker >/dev/null
+    docker version --format "{{.Server.Version}}" >/dev/null
+    docker image inspect openclaw-sandbox:bookworm-slim >/dev/null
+  ' || die "OpenClaw Gateway cannot reach its restricted Docker socket proxy"
 
-  log "openclaw-gateway can reach sandbox dind daemon over DOCKER_HOST (server ${server_version})"
+  docker_cmd exec -i -u ai "$container_id" node - <<'NODE' \
+    || die "OpenClaw Gateway does not have the expected Docker sandbox configuration"
+const fs = require("node:fs");
+const config = JSON.parse(fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH, "utf8"));
+const sandbox = config.agents?.defaults?.sandbox ?? {};
+if (sandbox.backend !== "docker" || sandbox.mode !== "non-main" || sandbox.scope !== "agent" || sandbox.workspaceAccess !== "none" || sandbox.browser?.enabled !== false || sandbox.docker?.image !== "openclaw-sandbox:bookworm-slim" || sandbox.docker?.network !== "none" || sandbox.docker?.user !== "10000:20000") process.exit(1);
+for (const agent of ["main", "codex", "claude"]) {
+  if (config.agents?.entries?.[agent]?.sandbox?.workspaceRoot !== `/home/ai/.openclaw/sandboxes/${agent}`) process.exit(1);
+  if (config.agents?.entries?.[agent]?.sandbox?.ssh !== undefined) process.exit(1);
+}
+NODE
+
+  local spec
+  spec="$(docker_cmd service inspect "${STACK_NAME}_openclaw-gateway" --format '{{json .Spec.TaskTemplate.ContainerSpec}}')"
+  printf '%s' "$spec" | jq --exit-status --arg sandboxes "$OPENCLAW_DOCKER_SANDBOX_WORKSPACE_ROOT" '
+    ((.Mounts // []) | any(.Source == $sandboxes and .Target == "/home/ai/.openclaw/sandboxes" and ((.ReadOnly // false) == false)))
+    and ((.Mounts // []) | all(.Source != "/var/run/docker.sock"))
+  ' >/dev/null || die "OpenClaw Gateway sandbox mount or raw Docker socket policy is invalid"
+  log "OpenClaw Docker sandbox configuration is effective"
 }
 
-# check_openclaw_sandbox_dind_host_service and check_openclaw_gateway_docker_cli
-# together only prove the dind daemon is up, privileged, and reachable from
-# openclaw-gateway over DOCKER_HOST - neither proves the actual sandbox image
-# OpenClaw's Docker backend looks for (openclaw-sandbox:bookworm-slim, see
-# docker/openclaw-sandbox/Dockerfile and ensure_openclaw_sandbox_image) has
-# ever been built into it. That gap is exactly how "docker CLI reaches the
-# daemon fine" and "Sandbox image not found: openclaw-sandbox:bookworm-slim"
-# showed up as two separate, sequential failures in the same debugging
-# session. Inspect the image directly inside openclaw-sandbox-dind, the same
-# daemon agents.defaults.sandbox.backend=docker resolves to at runtime.
-check_openclaw_sandbox_image() {
-  local image_id
-  image_id="$(docker_cmd exec ai-stand-openclaw-sandbox-dind docker image inspect "$OPENCLAW_SANDBOX_IMAGE" --format '{{.Id}}' 2>/dev/null || true)"
-  [ -n "$image_id" ] \
-    || die "openclaw-sandbox-dind is missing the ${OPENCLAW_SANDBOX_IMAGE} image OpenClaw's Docker sandbox backend requires"
-
-  log "OpenClaw sandbox image ${OPENCLAW_SANDBOX_IMAGE} is present in openclaw-sandbox-dind (${image_id})"
+check_coder_docker_endpoint() {
+  [ "$CODER_ENABLED" = "1" ] || return 0
+  local container_id
+  container_id="$(local_service_container "${STACK_NAME}_coder")"
+  [ -n "$container_id" ] || die "Coder task is not running locally on ${NODE_NAME}"
+  docker_cmd exec "$container_id" sh -ceu '
+    test ! -e /var/run/docker.sock
+    test "${DOCKER_HOST:-}" = "tcp://docker-socket-proxy-coder:2375"
+    response="$(curl --fail --silent --show-error --max-time 5 --noproxy "*" \
+      http://docker-socket-proxy-coder:2375/_ping)"
+    test "$response" = "OK"
+  ' || die "Coder cannot reach its restricted Docker socket proxy"
+  log "Coder uses only its restricted Docker socket proxy"
 }
 
 check_overlay_name() {
@@ -6400,16 +7438,21 @@ check_overlay_name() {
     authentik-redis) service="${STACK_NAME}_authentik-redis" ;;
     openwebui) service="${STACK_NAME}_openwebui" ;;
     openclaw|openclaw-gateway) service="${STACK_NAME}_openclaw-gateway" ;;
-    lmstudio) service="${STACK_NAME}_lmstudio" ;;
-    lmstudio-proxy) service="${STACK_NAME}_lmstudio-proxy" ;;
-    metamcp) service="${STACK_NAME}_metamcp" ;;
-    metamcp-postgres) service="${STACK_NAME}_metamcp-postgres" ;;
+    docker-socket-proxy-openclaw) service="${STACK_NAME}_docker-socket-proxy-openclaw" ;;
+    docker-socket-proxy-coder) service="${STACK_NAME}_docker-socket-proxy-coder" ;;
+    llamacpp01) service="${STACK_NAME}_llamacpp01" ;;
+    llamacpp02) service="${STACK_NAME}_llamacpp02" ;;
     agentgateway) service="${STACK_NAME}_agentgateway" ;;
     agentgateway-postgres) service="${STACK_NAME}_agentgateway-postgres" ;;
-    gigacode-identity-broker) service="${STACK_NAME}_gigacode-identity-broker" ;;
-    openclaw-gigacode-adapter) service="${STACK_NAME}_openclaw-gigacode-adapter" ;;
     coder) service="${STACK_NAME}_coder" ;;
     coder-postgresql) service="${STACK_NAME}_coder-postgresql" ;;
+    gitea) service="${STACK_NAME}_gitea" ;;
+    gitea-postgresql) service="${STACK_NAME}_gitea-postgresql" ;;
+    gitea-ssh-sync) service="${STACK_NAME}_gitea-ssh-sync" ;;
+    controller) service="${STACK_NAME}_controller" ;;
+    cert-receiver) service="${STACK_NAME}_cert-receiver" ;;
+    ssh-key-sender) service="${STACK_NAME}_ssh-key-sender" ;;
+    ssh-key-receiver) service="${STACK_NAME}_ssh-key-receiver" ;;
     portainer) service="${STACK_NAME}_portainer" ;;
     portainer-agent|tasks.portainer-agent) service="${STACK_NAME}_portainer-agent" ;;
     *) die "Unknown overlay name check: ${name}" ;;
@@ -6427,19 +7470,22 @@ check_overlay_name() {
 # ai-models-backend intentionally remains a non-attachable encrypted overlay:
 # application services never receive a Docker socket, and a host-root
 # diagnostic must not make a closed model network attachable merely to run
-# curl.  LM Studio is already attached to that network and is built from the
-# base image containing curl, so use its running task for read-only probes.
+# curl.  llama.cpp tasks are already attached to that network and are built
+# from the base image containing curl, so use the requested running task for
+# read-only probes.
 models_backend_curl() {
+  local service="$1"
   local container
+  shift
   container="$(
     docker_cmd ps \
-      --filter "label=com.docker.swarm.service.name=${STACK_NAME}_lmstudio" \
+      --filter "label=com.docker.swarm.service.name=${STACK_NAME}_${service}" \
       --filter status=running \
       --format '{{.ID}}' \
       | head -n 1
   )"
-  [ -n "$container" ] || die "No running LM Studio task is available for ai-models-backend probe"
-  docker_cmd exec -i "$container" curl "$@"
+  [ -n "$container" ] || die "No running ${service} task is available for ai-models-backend probe"
+  docker_cmd exec -i -u "${APP_UID}:${APP_GID}" "$container" curl "$@"
 }
 
 check_https_retry() {
@@ -6511,8 +7557,8 @@ https_path_for_domain() {
     "$OPENCLAW_HOST") printf '%s\n' "/healthz" ;;
     "$PORTAINER_HOST") printf '%s\n' "/api/status" ;;
     "$CODER_HOST") printf '%s\n' "/healthz" ;;
+    "$GITEA_HOST") printf '%s\n' "/api/healthz" ;;
     "$AUTHENTIK_HOST") printf '%s\n' "/" ;;
-    "$METAMCP_HOST") printf '%s\n' "/health" ;;
     *) die "Unknown HTTPS check domain: $1" ;;
   esac
 }
@@ -6601,20 +7647,6 @@ check_authentik_configuration() {
 
   curl --fail --silent --show-error --max-time 30 \
     --resolve "${AUTHENTIK_HOST}:443:127.0.0.1" \
-    "https://${AUTHENTIK_HOST}/application/o/metamcp/.well-known/openid-configuration" \
-    | jq --exit-status \
-      --arg issuer "https://${AUTHENTIK_HOST}/application/o/metamcp/" \
-      '.issuer == $issuer and (.authorization_endpoint | type == "string") and (.token_endpoint | type == "string") and (.jwks_uri | type == "string")' \
-      >/dev/null
-  curl --fail --silent --show-error --max-time 30 \
-    --resolve "${AUTHENTIK_HOST}:443:127.0.0.1" \
-    "https://${AUTHENTIK_HOST}/application/o/metamcp/jwks/" \
-    | jq --exit-status '.keys | type == "array" and length > 0' \
-      >/dev/null
-  log "Authentik MetaMCP OIDC discovery is configured"
-
-  curl --fail --silent --show-error --max-time 30 \
-    --resolve "${AUTHENTIK_HOST}:443:127.0.0.1" \
     "https://${AUTHENTIK_HOST}/application/o/agentgateway/.well-known/openid-configuration" \
     | jq --exit-status \
       --arg issuer "https://${AUTHENTIK_HOST}/application/o/agentgateway/" \
@@ -6641,92 +7673,128 @@ check_authentik_configuration() {
   log "Authentik Agentgateway MCP OIDC discovery is configured"
 }
 
-check_lmstudio_model_inventory() {
+
+
+validate_llamacpp_verification_timeout() {
+  case "$LLAMACPP_CHAT_TIMEOUT_SECONDS" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#LLAMACPP_CHAT_TIMEOUT_SECONDS}" -le 5 ] \
+    && [ "$LLAMACPP_CHAT_TIMEOUT_SECONDS" -gt 0 ] \
+    && [ "$LLAMACPP_CHAT_TIMEOUT_SECONDS" -le 86400 ]
+}
+
+check_llamacpp_model_inventory() {
   local timeout_seconds="${1:-10800}"
   local deadline=$(( $(date +%s) + timeout_seconds ))
-  local response
-  local poll_count=0
-  local lmstudio_container
-  local chat_model
-  local embedding_model
-
-  chat_model="$(effective_lmstudio_model_identifier)"
-  embedding_model="$(effective_lmstudio_embedding_model_identifier)"
-
-  if [ "$NODE_NAME" = "ai01" ]; then
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-      lmstudio_container="$(local_service_container "${STACK_NAME}_lmstudio")"
-      if [ -n "$lmstudio_container" ]; then
-        response="$(
-          docker_cmd exec -u ai "$lmstudio_container" sh -lc \
-            '$HOME/.lmstudio/bin/lms ps --json' 2>/dev/null || true
-        )"
-
-        if printf '%s' "$response" \
-          | jq --exit-status \
-            --arg chat_model "$chat_model" \
-            --arg embedding_model "$embedding_model" \
-            'any(.[]?;
-                .identifier == $chat_model
-                and ((.status // "") | ascii_downcase) == "idle"
-              )
-             and any(.[]?;
-                .identifier == $embedding_model
-                and ((.status // "") | ascii_downcase) == "idle"
-              )' \
-            >/dev/null 2>&1; then
-          log "LM Studio loaded models ok: ${chat_model}, ${embedding_model}"
-          return 0
-        fi
-      fi
-
-      if [ "$poll_count" -eq 0 ] || [ $((poll_count % 10)) -eq 0 ]; then
-        local ids
-        ids="$(printf '%s' "$response" | jq --raw-output '[.[]?.identifier] | join(", ")' 2>/dev/null || true)"
-        log "Waiting for loaded LM Studio models: ${chat_model}, ${embedding_model}; currently: ${ids:-unavailable}"
-      fi
-
-      poll_count=$((poll_count + 1))
-      sleep 30
-    done
-
-    die "LM Studio did not keep required models loaded: ${chat_model}, ${embedding_model}"
-  fi
-
+  local poll_count=0 container service expected_model
+  case "$NODE_NAME" in
+    ai01) service=llamacpp01; expected_model="$(effective_llamacpp_model_identifier)" ;;
+    ai02) service=llamacpp02; expected_model="$(effective_llamacpp_embedding_model_identifier)" ;;
+    *) die "Native model verification is unsupported on node $NODE_NAME" ;;
+  esac
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    response="$(
-      models_backend_curl --fail --silent --show-error http://lmstudio:1234/v1/models 2>/dev/null || true
-    )"
-    response="$(printf '%s\n' "$response" | sed -n '/^[[:space:]]*{/,$p')"
-
-    if printf '%s' "$response" \
-      | jq --exit-status \
-        --arg chat_model "$chat_model" \
-        --arg embedding_model "$embedding_model" \
-        '[.data[]?.id] as $ids | ($ids | index($chat_model)) and ($ids | index($embedding_model))' \
-        >/dev/null 2>&1; then
-      log "LM Studio model inventory ok: ${chat_model}, ${embedding_model}"
+    container="$(local_service_container "${STACK_NAME}_${service}")"
+    if [ -n "$container" ] \
+      && docker_cmd exec -u "${APP_UID}:${APP_GID}" "$container" \
+        /usr/local/bin/llamacpp-healthcheck.sh --ready --verify-loaded; then
+      # Readiness checks build provenance, exact GGUF/projector SHA, native
+      # props, successful inference and required GPU offload, not catalog alone.
+      log "${service} verified native loaded model: $expected_model"
       return 0
     fi
-
     if [ "$poll_count" -eq 0 ] || [ $((poll_count % 10)) -eq 0 ]; then
-      local ids
-      ids="$(printf '%s' "$response" | jq --raw-output '[.data[]?.id] | join(", ")' 2>/dev/null || true)"
-      log "Waiting for LM Studio models: ${chat_model}, ${embedding_model}; currently: ${ids:-unavailable}"
+      log "Waiting for ${service} native readiness and inference proof: $expected_model"
     fi
-
     poll_count=$((poll_count + 1))
     sleep 30
   done
-
-  die "LM Studio did not expose required models: ${chat_model}, ${embedding_model}"
+  die "${service} did not pass native model readiness: $expected_model"
 }
 
-check_lmstudio_chat_completion() {
+check_agentgateway_model_inventory() {
+  local token models_file chat_model embedding_model
+  token="$(run_root cat "${AI_STAND_SECRETS_DIR}/agentgateway-openwebui-token")"
+  chat_model="$(effective_llamacpp_model_identifier)"
+  embedding_model="$(effective_llamacpp_embedding_model_identifier)"
+  models_file="$(mktemp)"
+
+  if ! curl --fail --silent --show-error --max-time 30 \
+    --header "Authorization: Bearer ${token}" \
+    http://127.0.0.1:4000/v1/models > "$models_file"; then
+    sed 's/^/[agentgateway-models] /' "$models_file" >&2 || true
+    rm -f "$models_file"
+    die "Agentgateway model inventory request failed"
+  fi
+
+  # Only the active chat model and the selected embedding model may be
+  # public. Other downloaded embedding weights are node-local recovery
+  # inventory and must never appear in the client-visible model list.
+  jq --exit-status \
+    --arg chat_model "$chat_model" \
+    --arg embedding_model "$embedding_model" \
+    '[.data[]?.id] as $ids
+     | ($ids | index($chat_model))
+     and ($ids | index($embedding_model))
+     and ([ $ids[] | select(startswith("qwen3-embedding-")) ] == [$embedding_model])' \
+    "$models_file" >/dev/null \
+    || {
+      sed 's/^/[agentgateway-models] /' "$models_file" >&2 || true
+      rm -f "$models_file"
+      die "Agentgateway exposes an unexpected llama.cpp model inventory"
+    }
+
+  rm -f "$models_file"
+  log "Agentgateway exposes only the selected chat and embedding models"
+}
+
+check_agentgateway_embedding() {
+  local token request_file response_file embedding_model embedding_dimensions
+  token="$(run_root cat "${AI_STAND_SECRETS_DIR}/agentgateway-openwebui-token")"
+  embedding_model="$(effective_llamacpp_embedding_model_identifier)"
+  embedding_dimensions="$(service_env_value "${STACK_NAME}_openclaw-gateway" OPENCLAW_LANCEDB_EMBEDDING_DIMENSIONS)"
+  case "$embedding_model" in
+    qwen3-embedding-8b) embedding_dimensions=4096 ;;
+    qwen3-embedding-4b) embedding_dimensions=2560 ;;
+    qwen3-embedding-0.6b) embedding_dimensions=1024 ;;
+  esac
+  [[ "$embedding_dimensions" =~ ^[1-9][0-9]*$ ]] || die "Embedding dimension contract is unavailable"
+  request_file="$(mktemp)"
+  response_file="$(mktemp)"
+
+  jq --null-input --arg model "$embedding_model" \
+    '{model: $model, input: "ai-stand embedding route verification"}' \
+    > "$request_file"
+  if ! curl --fail --silent --show-error --max-time "$LLAMACPP_CHAT_TIMEOUT_SECONDS" \
+    --header "Authorization: Bearer ${token}" \
+    --header 'Content-Type: application/json' \
+    --data @"$request_file" \
+    http://127.0.0.1:4000/v1/embeddings > "$response_file"; then
+    sed 's/^/[agentgateway-embeddings] /' "$response_file" >&2 || true
+    rm -f "$request_file" "$response_file"
+    die "Agentgateway embedding request failed for ${embedding_model}"
+  fi
+  jq --exit-status \
+    --arg embedding_model "$embedding_model" \
+    --argjson dimensions "$embedding_dimensions" \
+    '.model == $embedding_model
+     and (.data[0].embedding | type == "array" and length == $dimensions)' \
+    "$response_file" >/dev/null \
+    || {
+      sed 's/^/[agentgateway-embeddings] /' "$response_file" >&2 || true
+      rm -f "$request_file" "$response_file"
+      die "Agentgateway returned an invalid embedding response for ${embedding_model}"
+    }
+
+  rm -f "$request_file" "$response_file"
+  log "Agentgateway embedding route ok: ${embedding_model}"
+}
+
+check_llamacpp_chat_completion() {
   local request_file
   local response_file
   local chat_model
-  chat_model="$(effective_lmstudio_model_identifier)"
+  chat_model="$(effective_llamacpp_model_identifier)"
   request_file="$(mktemp)"
   response_file="$(mktemp)"
 
@@ -6746,18 +7814,18 @@ check_lmstudio_chat_completion() {
     }' \
     > "$request_file"
 
-  if ! models_backend_curl \
+  if ! models_backend_curl llamacpp01 \
     --fail \
     --silent \
     --show-error \
-    --max-time "$LMSTUDIO_CHAT_TIMEOUT_SECONDS" \
+    --max-time "$LLAMACPP_CHAT_TIMEOUT_SECONDS" \
     --header "Content-Type: application/json" \
     --data @- \
-    "http://lmstudio:1234/v1/chat/completions" \
+    "http://llamacpp01:1234/v1/chat/completions" \
     < "$request_file" > "$response_file"; then
-    sed 's/^/[lmstudio-chat] /' "$response_file" >&2 || true
+    sed 's/^/[llamacpp-chat] /' "$response_file" >&2 || true
     rm -f "$request_file" "$response_file"
-    die "LM Studio chat completion failed or timed out for ${chat_model}"
+    die "llama.cpp chat completion failed or timed out for ${chat_model}"
   fi
 
   jq --exit-status '
@@ -6767,46 +7835,45 @@ check_lmstudio_chat_completion() {
   ' "$response_file" >/dev/null \
     || {
       rm -f "$request_file" "$response_file"
-      die "LM Studio chat completion returned no content for ${chat_model}"
+      die "llama.cpp chat completion returned no content for ${chat_model}"
     }
 
   rm -f "$request_file" "$response_file"
-  log "LM Studio chat completion ok: ${chat_model}"
+  log "llama.cpp chat completion ok: ${chat_model}"
 }
 
-check_lmstudio_proxy_stream_request() {
+check_llamacpp_stream_request() {
   local name="$1"
   local request_file="$2"
   local expect_tool_call="${3:-any}" # yes | no | any
   local response_file
   response_file="$(mktemp)"
 
-  if ! models_backend_curl \
+  if ! models_backend_curl llamacpp01 \
     --fail \
     --silent \
     --show-error \
-    --max-time "$LMSTUDIO_CHAT_TIMEOUT_SECONDS" \
+    --max-time "$LLAMACPP_CHAT_TIMEOUT_SECONDS" \
     --header "Content-Type: application/json" \
     --data @- \
-    "http://lmstudio-proxy:11234/v1/chat/completions" \
+    "http://llamacpp01:1234/v1/chat/completions" \
     < "$request_file" > "$response_file"; then
-    sed 's/^/[lmstudio-proxy-chat] /' "$response_file" >&2 || true
+    sed 's/^/[llamacpp-chat] /' "$response_file" >&2 || true
     rm -f "$response_file"
-    die "LM Studio proxy ${name} request failed or timed out"
+    die "llama.cpp ${name} request failed or timed out"
   fi
 
   # Reassemble the SSE chunk stream into one JSON array so finish_reason and
   # whether any tool_calls delta actually carried a function name can be
   # asserted - a bare "did we get any 'data:' line" check would pass even for
   # a stream that silently degraded to plain text instead of a real tool
-  # call (this is exactly how the STRIP_TOOLS_AFTER_RESULT regression slipped
-  # through before: the response was well-formed SSE, just the wrong content).
+  # call: valid SSE alone does not prove that the native tool loop works.
   local chunks_json
   chunks_json="$(grep '^data:' "$response_file" | sed 's/^data: //' | grep -v '^\[DONE\]$' | jq -s '.' 2>/dev/null)"
   if [ -z "$chunks_json" ] || [ "$chunks_json" = "[]" ]; then
-    sed 's/^/[lmstudio-proxy-chat] /' "$response_file" >&2 || true
+    sed 's/^/[llamacpp-chat] /' "$response_file" >&2 || true
     rm -f "$response_file"
-    die "LM Studio proxy ${name} request did not return any SSE data chunks"
+    die "llama.cpp ${name} request did not return any SSE data chunks"
   fi
 
   local finish_reason has_tool_call
@@ -6814,52 +7881,52 @@ check_lmstudio_proxy_stream_request() {
   has_tool_call="$(printf '%s' "$chunks_json" | jq -r 'any(.[]; ((.choices[0].delta.tool_calls // [])[]?.function.name // "") != "")')"
 
   if [ -z "$finish_reason" ]; then
-    sed 's/^/[lmstudio-proxy-chat] /' "$response_file" >&2 || true
+    sed 's/^/[llamacpp-chat] /' "$response_file" >&2 || true
     rm -f "$response_file"
-    die "LM Studio proxy ${name} request never reached a finish_reason"
+    die "llama.cpp ${name} request never reached a finish_reason"
   fi
 
   case "$expect_tool_call" in
     yes)
       if [ "$has_tool_call" != "true" ] || [ "$finish_reason" != "tool_calls" ]; then
-        sed 's/^/[lmstudio-proxy-chat] /' "$response_file" >&2 || true
+        sed 's/^/[llamacpp-chat] /' "$response_file" >&2 || true
         rm -f "$response_file"
-        die "LM Studio proxy ${name} expected a tool call but got finish_reason=${finish_reason} has_tool_call=${has_tool_call}"
+        die "llama.cpp ${name} expected a tool call but got finish_reason=${finish_reason} has_tool_call=${has_tool_call}"
       fi
       ;;
     no)
       if [ "$has_tool_call" = "true" ]; then
-        sed 's/^/[lmstudio-proxy-chat] /' "$response_file" >&2 || true
+        sed 's/^/[llamacpp-chat] /' "$response_file" >&2 || true
         rm -f "$response_file"
-        die "LM Studio proxy ${name} unexpectedly returned a tool call"
+        die "llama.cpp ${name} unexpectedly returned a tool call"
       fi
       ;;
     any) : ;;
-    *) die "check_lmstudio_proxy_stream_request: unknown expect_tool_call value: ${expect_tool_call}" ;;
+    *) die "check_llamacpp_stream_request: unknown expect_tool_call value: ${expect_tool_call}" ;;
   esac
 
   rm -f "$response_file"
-  log "LM Studio proxy ${name} stream ok (finish_reason=${finish_reason})"
+  log "llama.cpp ${name} stream ok (finish_reason=${finish_reason})"
 }
 
-check_lmstudio_proxy_tool_compat() {
+check_llamacpp_tool_compat() {
   local chat_model
   local models_file
   local request_file
-  chat_model="$(effective_lmstudio_model_identifier)"
+  chat_model="$(effective_llamacpp_model_identifier)"
   models_file="$(mktemp)"
   request_file="$(mktemp)"
 
-  if ! models_backend_curl \
+  if ! models_backend_curl llamacpp01 \
     --fail \
     --silent \
     --show-error \
     --max-time 30 \
-    "http://lmstudio-proxy:11234/v1/models" \
+    "http://llamacpp01:1234/v1/models" \
     > "$models_file"; then
-    sed 's/^/[lmstudio-proxy-models] /' "$models_file" >&2 || true
+    sed 's/^/[llamacpp-models] /' "$models_file" >&2 || true
     rm -f "$models_file" "$request_file"
-    die "LM Studio proxy model inventory failed"
+    die "llama.cpp model inventory failed"
   fi
 
   jq --exit-status \
@@ -6868,10 +7935,10 @@ check_lmstudio_proxy_tool_compat() {
     "$models_file" >/dev/null \
     || {
       rm -f "$models_file" "$request_file"
-      die "LM Studio proxy model inventory does not contain ${chat_model}"
+      die "llama.cpp model inventory does not contain ${chat_model}"
     }
   rm -f "$models_file"
-  log "LM Studio proxy model inventory ok: ${chat_model}"
+  log "llama.cpp model inventory ok: ${chat_model}"
 
   jq --null-input \
     --arg model "$chat_model" \
@@ -6887,7 +7954,7 @@ check_lmstudio_proxy_tool_compat() {
       ]
     }' \
     > "$request_file"
-  check_lmstudio_proxy_stream_request "plain-chat" "$request_file" "no"
+  check_llamacpp_stream_request "plain-chat" "$request_file" "no"
 
   local bash_tool='{
     "type": "function",
@@ -6924,11 +7991,10 @@ check_lmstudio_proxy_tool_compat() {
       ]
     }' \
     > "$request_file"
-  check_lmstudio_proxy_stream_request "first-tool-request" "$request_file" "yes"
+  check_llamacpp_stream_request "first-tool-request" "$request_file" "yes"
 
-  # This exact shape - tools/tool_choice/parallel_tool_calls still present
-  # alongside a freshly completed tool round-trip - is what
-  # STRIP_TOOLS_AFTER_RESULT_ENABLED (off by default) would otherwise strip.
+  # Keep tools/tool_choice/parallel_tool_calls present through the completed
+  # tool round-trip; the transport proxy must not rewrite this payload.
   jq --null-input \
     --arg model "$chat_model" \
     --argjson bash_tool "$bash_tool" \
@@ -6967,13 +8033,10 @@ check_lmstudio_proxy_tool_compat() {
       ]
     }' \
     > "$request_file"
-  check_lmstudio_proxy_stream_request "tool-continuation" "$request_file" "any"
+  check_llamacpp_stream_request "tool-continuation" "$request_file" "any"
 
-  # Regression guard for the STRIP_TOOLS_AFTER_RESULT_ENABLED bug: same
-  # completed round-trip as above, plus a brand new user turn that clearly
-  # calls for a second, different tool use. With the blanket (unscoped)
-  # strip this silently degraded to plain text (HTTP 200, no tool_calls) -
-  # this must come back as a real tool_calls response, not just any 200.
+  # The next user turn must still trigger a second tool, not silently
+  # degrade to plain text after a previous tool result.
   jq --null-input \
     --arg model "$chat_model" \
     --argjson bash_tool "$bash_tool" \
@@ -7016,62 +8079,19 @@ check_lmstudio_proxy_tool_compat() {
       ]
     }' \
     > "$request_file"
-  check_lmstudio_proxy_stream_request "second-tool-request-after-continuation" "$request_file" "yes"
+  check_llamacpp_stream_request "second-tool-request-after-continuation" "$request_file" "yes"
 
-  # Regression guard for the confirmed LM Studio 400 on image-bearing
-  # role:"tool" content - only meaningful (and only expected to pass) on
-  # installations that have FLATTEN_TOOL_RESULT_CONTENT_ENABLED=1.
-  if [ "${LMSTUDIO_PROXY_FLATTEN_TOOL_RESULT_CONTENT_ENABLED:-0}" = "1" ]; then
-    jq --null-input \
-      --arg model "$chat_model" \
-      --argjson bash_tool "$bash_tool" \
-      '{
-        model: $model,
-        stream: true,
-        max_tokens: 250,
-        temperature: 0,
-        tool_choice: "auto",
-        parallel_tool_calls: true,
-        tools: [$bash_tool],
-        messages: [
-          {
-            role: "user",
-            content: "Describe screenshot.png."
-          },
-          {
-            role: "assistant",
-            content: null,
-            tool_calls: [
-              {
-                id: "call_ai_stand_proxy_image_smoke",
-                type: "function",
-                function: {
-                  name: "bash",
-                  arguments: "{\"command\":\"Get-Content screenshot.png\"}"
-                }
-              }
-            ]
-          },
-          {
-            role: "tool",
-            tool_call_id: "call_ai_stand_proxy_image_smoke",
-            content: [
-              { type: "text", text: "screenshot.png" },
-              { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" } }
-            ]
-          }
-        ]
-      }' \
-      > "$request_file"
-    check_lmstudio_proxy_stream_request "image-tool-result" "$request_file" "any"
-  fi
+
 
   rm -f "$request_file"
-  log "LM Studio proxy tool compatibility ok: ${chat_model}"
+  log "llama.cpp tool compatibility ok: ${chat_model}"
 }
 
 cmd_verify() {
+  validate_llamacpp_verification_timeout \
+    || die "LLAMACPP_CHAT_TIMEOUT_SECONDS must be an integer from 1 to 86400 (verification only)"
   load_os_info
+  READ_ONLY_VERIFY="1"
   ensure_ai_stand_secrets
   if [ "$NODE_NAME" = "ai01" ]; then
     local accelerator
@@ -7083,82 +8103,111 @@ cmd_verify() {
     wait_service_ready "$service"
   done
 
-  check_service_label_placement "${STACK_NAME}_lmstudio" "ai-stand.lmstudio"
-  check_service_label_placement "${STACK_NAME}_lmstudio-proxy" "ai-stand.lmstudio"
+  check_service_label_placement "${STACK_NAME}_llamacpp01" "ai-stand.llamacpp01"
+  check_service_label_placement "${STACK_NAME}_llamacpp02" "ai-stand.llamacpp02"
   check_service_label_placement "${STACK_NAME}_openwebui" "ai-stand.openwebui"
   check_service_label_placement "${STACK_NAME}_openclaw-gateway" "ai-stand.openclaw"
+  check_service_label_placement "${STACK_NAME}_docker-socket-proxy-openclaw" "ai-stand.openclaw"
   check_service_label_placement "${STACK_NAME}_authentik-postgresql" "ai-stand.authentik"
   check_service_label_placement "${STACK_NAME}_authentik-redis" "ai-stand.authentik"
   check_service_label_placement "${STACK_NAME}_authentik-server" "ai-stand.authentik"
   check_service_label_placement "${STACK_NAME}_authentik-worker" "ai-stand.authentik"
   check_service_label_placement "${STACK_NAME}_portainer" "ai-stand.portainer"
-  check_service_label_placement "${STACK_NAME}_metamcp" "ai-stand.metamcp"
-  check_service_label_placement "${STACK_NAME}_metamcp-postgres" "ai-stand.metamcp"
   check_service_label_placement "${STACK_NAME}_agentgateway" "ai-stand.agentgateway"
-  if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then
-    check_service_label_placement "${STACK_NAME}_gigacode-identity-broker" "ai-stand.agentgateway"
-    check_service_label_placement "${STACK_NAME}_openclaw-gigacode-adapter" "ai-stand.openclaw"
-  fi
   if [ "$CODER_ENABLED" = "1" ]; then
     wait_service_ready "${STACK_NAME}_coder-postgresql"
     wait_service_ready "${STACK_NAME}_coder"
+    wait_service_ready "${STACK_NAME}_docker-socket-proxy-coder"
     check_service_label_placement "${STACK_NAME}_coder-postgresql" "ai-stand.coder"
     check_service_label_placement "${STACK_NAME}_coder" "ai-stand.coder"
+    check_service_label_placement "${STACK_NAME}_docker-socket-proxy-coder" "ai-stand.coder"
+  fi
+  if [ "${GITEA_ENABLED:-0}" = "1" ]; then
+    wait_service_ready "${STACK_NAME}_gitea-postgresql"
+    wait_service_ready "${STACK_NAME}_gitea"
+    check_service_label_placement "${STACK_NAME}_gitea-postgresql" "ai-stand.gitea"
+    check_service_label_placement "${STACK_NAME}_gitea" "ai-stand.gitea"
+  fi
+  if [ "${GITEA_SSH_SYNC_ENABLED:-0}" = "1" ]; then
+    check_service_label_placement "${STACK_NAME}_gitea-ssh-sync" "ai-stand.gitea"
+  fi
+  if [ "${SSH_KEY_DELIVERY_ENABLED:-0}" = "1" ]; then
+    check_service_label_placement "${STACK_NAME}_ssh-key-sender" "ai-stand.authentik"
+    check_service_label_placement "${STACK_NAME}_ssh-key-receiver" "ai-stand.coder"
+  fi
+  if [ "${CONTROLLER_ENABLED:-0}" = "1" ]; then
+    check_service_label_placement "${STACK_NAME}_controller" "ai-stand.controller"
+    if [ "${CERTBOT_RECEIVER_ENABLED:-0}" = "1" ]; then
+      check_service_label_placement "${STACK_NAME}_cert-receiver" "ai-stand.cert-receiver"
+    fi
   fi
 
-  check_overlay_name "${STACK_NAME}_ai-models-backend" lmstudio
-  check_overlay_name "${STACK_NAME}_ai-models-backend" lmstudio-proxy
+  check_overlay_name "${STACK_NAME}_ai-models-backend" llamacpp01
+  check_overlay_name "${STACK_NAME}_ai-models-backend" llamacpp02
   check_overlay_name "${STACK_NAME}_ai-core" authentik
   check_overlay_name "${STACK_NAME}_ai-core" authentik-postgresql
   check_overlay_name "${STACK_NAME}_ai-core" authentik-redis
   check_overlay_name "${STACK_NAME}_ai-core" openwebui
   check_overlay_name "${STACK_NAME}_ai-core" openclaw
   check_overlay_name "${STACK_NAME}_ai-core" openclaw-gateway
-  check_overlay_name "${STACK_NAME}_ai-core" metamcp
-  check_overlay_name "${STACK_NAME}_ai-core" metamcp-postgres
   check_overlay_name "${STACK_NAME}_ai-core" agentgateway
   check_overlay_name "${STACK_NAME}_ai-core" agentgateway-postgres
   check_overlay_name "${STACK_NAME}_ai-models-backend" agentgateway
   check_overlay_name "${STACK_NAME}_ai-mcp-backend" agentgateway
-  if [ "$GIGACODE_SUBSCRIPTION_ENABLED" = "1" ]; then
-    check_overlay_name "${STACK_NAME}_ai-core" gigacode-identity-broker
-    check_overlay_name "${STACK_NAME}_ai-core" openclaw-gigacode-adapter
-  fi
   if [ "$CODER_ENABLED" = "1" ]; then
     check_overlay_name "${STACK_NAME}_ai-coder-control" coder
     check_overlay_name "${STACK_NAME}_ai-coder-control" coder-postgresql
+    check_overlay_name "${STACK_NAME}_ai-coder-docker-control" coder
+    check_overlay_name "${STACK_NAME}_ai-coder-docker-control" docker-socket-proxy-coder
+  fi
+  if [ "${CONTROLLER_ENABLED:-0}" = "1" ]; then
+    check_overlay_name "${STACK_NAME}_ai-core" controller
+    if [ "${CERTBOT_RECEIVER_ENABLED:-0}" = "1" ]; then
+      check_overlay_name "${STACK_NAME}_ai-core" cert-receiver
+    fi
+  fi
+  if [ "${GITEA_SSH_SYNC_ENABLED:-0}" = "1" ]; then
+    check_overlay_name "${STACK_NAME}_ai-core" gitea-ssh-sync
+    check_overlay_name "${STACK_NAME}_ai-gitea-control" gitea-ssh-sync
+  fi
+  if [ "${SSH_KEY_DELIVERY_ENABLED:-0}" = "1" ]; then
+    check_overlay_name "${STACK_NAME}_ai-core" ssh-key-sender
+    check_overlay_name "${STACK_NAME}_ai-core" ssh-key-receiver
+  fi
+  if [ "${GITEA_ENABLED:-0}" = "1" ]; then
+    check_overlay_name "${STACK_NAME}_ai-gitea-control" gitea
+    check_overlay_name "${STACK_NAME}_ai-gitea-control" gitea-postgresql
   fi
   check_agentgateway_database
   check_readonly_mcp_configuration
+  check_controller
+  check_ssh_key_delivery
   check_overlay_name "${STACK_NAME}_ai-portainer-agent" portainer
   check_overlay_name "${STACK_NAME}_ai-portainer-agent" portainer-agent
   check_overlay_name "${STACK_NAME}_ai-portainer-agent" tasks.portainer-agent
   if [ "$NODE_NAME" = "ai02" ]; then
-    check_openclaw_sandbox_dind_host_service
-    check_openclaw_gateway_docker_cli
-    check_openclaw_sandbox_image
-    check_openclaw_sandbox_workspace_bridge
-    check_coder_rootless_docker_service
-    bootstrap_coder_admin
+    check_overlay_name "${STACK_NAME}_ai-openclaw-docker-control" openclaw-gateway
+    check_overlay_name "${STACK_NAME}_ai-openclaw-docker-control" docker-socket-proxy-openclaw
+    check_openclaw_docker_sandbox_configuration
+    check_coder_docker_endpoint
     check_coder_native_oidc
   fi
   check_openwebui_sso_only_environment
   check_openclaw_trusted_proxy_configuration
   check_openwebui_persistent_config
+  check_agentgateway_llm_jwks
   check_authentik_configuration
   check_portainer_oidc_configuration
   # check_portainer_oidc_configuration above only confirms Authentik/
-  # Portainer AGREE on how OIDC login should work - it says nothing about
-  # whether the actual environment/team/user access it depends on has
-  # drifted (e.g. a manual change in the Portainer UI). cmd_configure_portainer
-  # already has these deeper, authenticated checks; cmd_verify never reused
-  # them, so this class of drift went undetected here.
+  # Portainer AGREE on how OIDC login should work. Resolve the managed
+  # environment/team with read-only API calls; verification must not create
+  # them as a side effect.
   #
   # Gated to ai01, UNLIKE check_portainer_oidc_configuration above (bug
   # found and fixed 2026-09-13): that check hits the unauthenticated
   # /api/settings/public, so it's fine to run from either node's local
   # nginx. portainer_login() below needs PORTAINER_ADMIN_PASSWORD, which is
-  # a load_host_secret() - a LOCAL file under /mnt/storage/_secrets, not
+  # a load_host_secret() - a LOCAL file under AI_STAND_SECRETS_DIR, not
   # shared between nodes. Portainer itself only ever runs on ai01
   # (cmd_configure_portainer already die()s if not ai01), so ai01's copy of
   # that file is the one real admin password; ai02 has its own
@@ -7171,20 +8220,29 @@ cmd_verify() {
     local verify_portainer_endpoint_id
     local verify_portainer_team_id
     verify_portainer_jwt="$(portainer_login)"
-    verify_portainer_endpoint_id="$(ensure_portainer_endpoint "$verify_portainer_jwt")"
-    verify_portainer_team_id="$(ensure_portainer_team "$verify_portainer_jwt")"
+    verify_portainer_endpoint_id="$(verify_portainer_endpoint "$verify_portainer_jwt")"
+    verify_portainer_team_id="$(verify_portainer_team "$verify_portainer_jwt")"
     check_portainer_environment_configuration "$verify_portainer_jwt" "$verify_portainer_endpoint_id" "$verify_portainer_team_id"
     check_portainer_oauth_admin_users "$verify_portainer_jwt" "$verify_portainer_team_id"
     check_portainer_oauth_user_endpoint_access "$verify_portainer_jwt" "$verify_portainer_endpoint_id"
   fi
+  # Each node owns exactly one isolated llama.cpp task. Verify the local
+  # task on both hosts, then verify the public Agentgateway routes from the
+  # node that hosts Agentgateway.
+  local catalog_role catalog_home
+  case "$NODE_NAME" in
+    ai01) catalog_role=chat; catalog_home="$LLAMACPP01_DATA" ;;
+    ai02) catalog_role=embedding; catalog_home="$LLAMACPP02_DATA" ;;
+    *) die "Model catalog verification is unsupported for ${NODE_NAME}" ;;
+  esac
+  run_root python3 "${SCRIPT_DIR}/model-catalog/prepare.py" \
+    --role "$catalog_role" --root "$catalog_home" --verify-only
+  check_llamacpp_model_inventory 10800
   if [ "$NODE_NAME" = "ai01" ]; then
-    # LM Studio is intentionally pinned to ai01 and its model network is
-    # closed to ad-hoc containers.  The inventory and completion probes run
-    # from that node through its attached LM Studio task; ai02 verifies
-    # OpenClaw/DIND instead of attempting a cross-node model probe.
-    check_lmstudio_model_inventory 10800
-    check_lmstudio_chat_completion
-    check_lmstudio_proxy_tool_compat
+    check_llamacpp_chat_completion
+    check_llamacpp_tool_compat
+    check_agentgateway_model_inventory
+    check_agentgateway_embedding
     # llm.policies.apiKey (mode: strict) gates this unconditionally - so
     # this runs here directly rather than through local_service_domains()'s
     # generic bare-success loop (see that function's own comment).
@@ -7195,7 +8253,7 @@ cmd_verify() {
   if [ "$NODE_NAME" = "ai01" ]; then
     check_https_retry "$AUTHENTIK_HOST" "$(https_path_for_domain "$AUTHENTIK_HOST")" 600
     local icon_file
-    for icon_file in openwebui.png portainer.svg metamcp.ico agentgateway.svg openclaw.png coder.svg; do
+    for icon_file in openwebui.png portainer.svg agentgateway.svg openclaw.png coder.svg gitea.svg; do
       check_https_retry "$AUTHENTIK_HOST" "/app-icons/${icon_file}" 60
     done
   fi
@@ -7207,6 +8265,7 @@ cmd_verify() {
     check_port_closed_to_non_loopback "$port"
   done < <(technical_ports_for_current_node)
 
+  check_host_timezone
   run_root firewall-cmd --state >/dev/null
   run_root nginx -t >/dev/null
   log "Verification complete"
@@ -7248,11 +8307,19 @@ main() {
     preflight) cmd_preflight ;;
     host) cmd_host ;;
     images) cmd_images ;;
+    deploy-models) cmd_deploy_models ;;
+    configure-model-routing) cmd_configure_model_routing ;;
     deploy) cmd_deploy ;;
+    templates) cmd_templates ;;
     reconcile-mcp) cmd_reconcile_mcp ;;
     configure-authentik) cmd_configure_authentik ;;
+    configure-gitea) cmd_configure_gitea ;;
+    configure-gitea-ssh-sync) cmd_configure_gitea_ssh_sync ;;
+    cleanup-legacy-gitea-ssh-sync) cmd_cleanup_legacy_gitea_ssh_sync ;;
+    deploy-controller) cmd_deploy_controller ;;
+    configure-ssh-key-delivery) cmd_configure_ssh_key_delivery ;;
+    cleanup-legacy-host-timers) cmd_cleanup_legacy_host_timers ;;
     onboard-readonly-mcp-user) cmd_onboard_readonly_mcp_user ;;
-    migrate-metamcp-tenants) cmd_migrate_metamcp_tenants ;;
     configure-portainer) cmd_configure_portainer ;;
     verify) cmd_verify ;;
     credentials) cmd_credentials ;;

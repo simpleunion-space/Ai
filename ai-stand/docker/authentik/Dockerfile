@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-ARG BASE_IMAGE=ghcr.io/simpleunion/base:2026.08.07-1
-ARG AUTHENTIK_VERSION=2026.8.1
+ARG BASE_IMAGE=ghcr.io/simpleunion/base:2026.10.13-1
+ARG AUTHENTIK_VERSION=2026.8.3
 
 FROM ghcr.io/goauthentik/server:${AUTHENTIK_VERSION} AS authentik-upstream
 
@@ -62,7 +62,7 @@ ENV PATH=/lifecycle:/ak-root/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     GOFIPS=1 \
-    IM_TZ=Europe/Moscow \
+    IM_TZ=UTC \
     IM_UID=1000 \
     IM_GID=1000
 
@@ -76,7 +76,7 @@ CMD ["ak", "server"]
 
 FROM ${BASE_IMAGE} AS node-base
 
-ARG NODE_VERSION=24.20.0
+ARG NODE_VERSION=24.21.0
 
 COPY --chmod=0755 docker/lib/install-node.sh /tmp/install-node.sh
 RUN /tmp/install-node.sh "$NODE_VERSION" && rm -f /tmp/install-node.sh
@@ -87,9 +87,11 @@ FROM node-base AS authentik-configurator
 RUN install -d --owner=ai --group=ai --mode=0755 /opt/authentik-configurator
 
 COPY --chown=ai:ai --chmod=0755 docker/authentik/configure.mjs /opt/authentik-configurator/configure.mjs
+COPY --chown=ai:ai --chmod=0644 docker/authentik/cleanup-gitlab.mjs /opt/authentik-configurator/cleanup-gitlab.mjs
+COPY --chown=ai:ai --chmod=0644 docker/authentik/cleanup-metamcp.mjs /opt/authentik-configurator/cleanup-metamcp.mjs
 
 # Defaults below cover only the vars needed to start; the full set
-# configure.mjs actually requires (METAMCP/AGENTGATEWAY urls and
+# configure.mjs actually requires (AGENTGATEWAY urls and
 # client secrets included) has no image-level default at all - apply.sh's
 # cmd_configure_authentik() always passes every one of them explicitly via
 # `docker run --env`, so this image is not meant to run standalone without

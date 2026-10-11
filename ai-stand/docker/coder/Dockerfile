@@ -1,4 +1,4 @@
-ARG CODER_BASE_IMAGE=ghcr.io/coder/coder:v2.36.6
+ARG CODER_BASE_IMAGE=ghcr.io/coder/coder:v2.38.0
 FROM ${CODER_BASE_IMAGE}
 
 USER root

@@ -1,0 +1,172 @@
+# The ai-stand controller: the recurring jobs that used to be host systemd timers, as one container (ai01), and the
+# certificate receiver that replaces the SSH hand-over to the other node (ai02). See docker/controller/README.md.
+#
+# `controller` supervises three jobs (CONTROLLER_JOBS): the read-only MCP / Telegram reconciler, the Open WebUI model
+# access reconciler and the certbot renewal. It needs the Docker socket (it creates Docker secrets and services and runs
+# apply.sh stages and sibling certbot containers) and the operator checkout of the repository, mounted read-only at its
+# host path because apply.sh derives every path from its own location. That is root-equivalent on ai01 - the same power
+# the host timers had - so the container has no published port and a read-only root filesystem.
+#
+# `cert-receiver` accepts the renewed certificate from the controller over the encrypted overlay network (bearer token
+# from a Docker secret) and activates it on its own node. It has no Docker socket.
+
+services:
+  controller:
+    image: ${CONTROLLER_IMAGE:?CONTROLLER_IMAGE is required}
+    command: ["run"]
+    # Not read_only and no tmpfs /tmp: apply.sh may run files it writes to /tmp, and Docker mounts tmpfs noexec. The
+    # container is root with the Docker socket either way, so a read-only root filesystem would add little.
+    environment:
+      CONTROLLER_JOBS: ${CONTROLLER_JOBS:-reconcile,model-access,certbot}
+      AI_STAND_REPO: ${AI_STAND_DIR:?AI_STAND_DIR is required}
+      AI_STAND_INSTALLATION: ${CONTROLLER_INSTALLATION:?CONTROLLER_INSTALLATION is required}
+      AI_STAND_NODE: ai01
+      CERT_DOMAIN: ${CERT_DOMAIN:-}
+      CERTBOT_IMAGE: ${CERTBOT_IMAGE:-}
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL:-}
+      CERTBOT_DATA: ${CERTBOT_DATA:?CERTBOT_DATA is required}
+      CERTBOT_HOOK_DIR: ${CONTROLLER_CERTBOT_HOOK_DIR:-}
+      CERTBOT_CREDENTIALS: ${CONTROLLER_CERTBOT_CREDENTIALS:-}
+      CERTBOT_AUTH_HOOK: ${CONTROLLER_CERTBOT_AUTH_HOOK:-}
+      CERTBOT_CLEANUP_HOOK: ${CONTROLLER_CERTBOT_CLEANUP_HOOK:-}
+      STORAGE_ROOT: ${STORAGE_ROOT:?STORAGE_ROOT is required}
+      CERTBOT_STATE_DIR: ${STORAGE_ROOT:?STORAGE_ROOT is required}/ai-stand-data/certbot
+      CERTBOT_PEER_URL: ${CONTROLLER_CERTBOT_PEER_URL:-}
+      CERTBOT_PEER_TOKEN_FILE: /run/secrets/ai-stand-certbot-receiver-token
+      TZ: "${IM_TZ:?IM_TZ is required}"
+    secrets:
+      - source: ai-stand-certbot-receiver-token
+        target: ai-stand-certbot-receiver-token
+        mode: 0400
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+      - type: bind
+        source: ${STORAGE_ROOT:?STORAGE_ROOT is required}
+        target: ${STORAGE_ROOT:?STORAGE_ROOT is required}
+      # apply.sh and the reconciler take their locks here; the operator's host runs use the same files.
+      - type: bind
+        source: /run/lock
+        target: /run/lock
+      - type: bind
+        source: ${AI_STAND_DIR}
+        target: ${AI_STAND_DIR}
+        read_only: true
+      # apply.sh reconcile-mcp only checks that the sources of the MCP images exist.
+      - type: bind
+        source: ${AI_STAND_MODULES_ROOT}/mcp-readonly-common
+        target: ${AI_STAND_MODULES_ROOT}/mcp-readonly-common
+        read_only: true
+      - type: bind
+        source: ${AI_STAND_MODULES_ROOT}/jira-readonly-mcp
+        target: ${AI_STAND_MODULES_ROOT}/jira-readonly-mcp
+        read_only: true
+      - type: bind
+        source: ${AI_STAND_MODULES_ROOT}/confluence-readonly-mcp
+        target: ${AI_STAND_MODULES_ROOT}/confluence-readonly-mcp
+        read_only: true
+      - type: bind
+        source: ${AI_STAND_MODULES_ROOT}/imap-readonly-mcp
+        target: ${AI_STAND_MODULES_ROOT}/imap-readonly-mcp
+        read_only: true
+    networks:
+      - ai-core
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/python3
+        - /opt/controller/controller.py
+        - healthcheck
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 1m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.controller == true
+      restart_policy:
+        condition: any
+        delay: 15s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 1m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 1m
+        order: stop-first
+
+  cert-receiver:
+    image: ${CONTROLLER_IMAGE:?CONTROLLER_IMAGE is required}
+    command: ["receive"]
+    read_only: true
+    environment:
+      CERT_DOMAIN: ${CERT_DOMAIN:-}
+      CERTBOT_DATA: ${CERTBOT_DATA:?CERTBOT_DATA is required}
+      TZ: "${IM_TZ:?IM_TZ is required}"
+    secrets:
+      - source: ai-stand-certbot-receiver-token
+        target: ai-stand-certbot-receiver-token
+        mode: 0400
+    volumes:
+      # The receiver writes the renewed lineage here; the host's nginx reads it from the same directory.
+      - type: bind
+        source: ${CERTBOT_DATA:?CERTBOT_DATA is required}
+        target: ${CERTBOT_DATA:?CERTBOT_DATA is required}
+      - type: tmpfs
+        target: /tmp
+    networks:
+      ai-core:
+        aliases:
+          - cert-receiver
+    cap_drop:
+      - ALL
+    cap_add:
+      # receive-cert.sh gives the new lineage the owner of the certificate directory and reads files it created.
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    stop_grace_period: 10s
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/python3
+        - /opt/controller/controller.py
+        - healthcheck
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      mode: replicated
+      # 0 where the profile has no second node to hand certificates to.
+      replicas: ${CONTROLLER_RECEIVER_REPLICAS:-0}
+      placement:
+        constraints:
+          - node.labels.ai-stand.cert-receiver == true
+      restart_policy:
+        condition: any
+        delay: 15s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 30s
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 30s
+        order: stop-first
+
+secrets:
+  ai-stand-certbot-receiver-token:
+    external: true

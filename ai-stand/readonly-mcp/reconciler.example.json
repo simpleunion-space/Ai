@@ -2,8 +2,9 @@
   "version": 1,
   "authentik": {
     "address": "https://authentik.example.invalid",
-    "apiTokenFile": "/mnt/storage/_secrets/readonly-mcp-authentik-api-token",
-    "aiUsersGroup": "ai-users"
+    "apiTokenFile": "<STORAGE_ROOT>/_secrets/readonly-mcp-authentik-api-token",
+    "aiUsersGroup": "ai-users",
+    "telegramOwner": "akadmin"
   },
   "upstreams": {
     "jiraBaseUrl": "https://jira.example.invalid/jira",
@@ -12,12 +13,6 @@
     "imapPort": 993,
     "imapTlsMode": "implicit",
     "caFile": "/etc/ssl/certs/ca-certificates.crt"
-  },
-  "gigacode": {
-    "enabled": false
-  },
-  "metamcp": {
-    "enabled": true
   },
   "userOverrides": {
     "upstreamsEnabled": false

@@ -1,3 +1,6 @@
 *
 !docker/
 !docker/**
+# The controller image bakes in the certificate scripts.
+!certbot/
+!certbot/*.sh

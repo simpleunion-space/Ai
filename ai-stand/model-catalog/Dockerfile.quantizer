@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1.7
+FROM ubuntu:26.04 AS build
+ARG LLAMA_CPP_COMMIT=d775ebf363f777bc862a8659b6c55eec9419cf35
+ARG LLAMA_CPP_ARCHIVE_SHA256=292e7c6cadac3faf23ca3dc3c29cd2e6482b027ff1dd198aa1dc88592f3d40e4
+RUN apt-get update && apt-get install --yes --no-install-recommends ca-certificates curl cmake g++ make \
+    && curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+       "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/${LLAMA_CPP_COMMIT}" -o /tmp/source.tar.gz \
+    && echo "${LLAMA_CPP_ARCHIVE_SHA256}  /tmp/source.tar.gz" | sha256sum --check --strict \
+    && mkdir /src && tar -xzf /tmp/source.tar.gz --strip-components=1 -C /src \
+    && cmake -S /src -B /build -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DBUILD_SHARED_LIBS=OFF \
+    && cmake --build /build --target llama-quantize -j 8
+FROM ubuntu:26.04
+ARG LLAMA_CPP_COMMIT=d775ebf363f777bc862a8659b6c55eec9419cf35
+ARG LLAMA_CPP_ARCHIVE_SHA256=292e7c6cadac3faf23ca3dc3c29cd2e6482b027ff1dd198aa1dc88592f3d40e4
+LABEL org.opencontainers.image.revision="${LLAMA_CPP_COMMIT}" \
+      ai-stand.quantizer.archive-sha256="${LLAMA_CPP_ARCHIVE_SHA256}"
+RUN apt-get update && apt-get install --yes --no-install-recommends libstdc++6 libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /build/bin/llama-quantize /usr/local/bin/llama-quantize
+USER 10000:20000
+ENTRYPOINT ["/usr/local/bin/llama-quantize"]

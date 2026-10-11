@@ -8,7 +8,7 @@ log() {
 
 IM_UID="${IM_UID:-1000}"
 IM_GID="${IM_GID:-1000}"
-IM_TZ="${IM_TZ:-Europe/Moscow}"
+IM_TZ="${IM_TZ:-UTC}"
 
 case "$IM_UID" in
     ''|*[!0-9]*)
@@ -106,6 +106,28 @@ for writable_path in $writable_paths; do
     fi
 done
 IFS="$old_ifs"
+
+# A small number of services need to prepare immutable, root-owned runtime
+# artifacts after the bind-mounted writable paths have been normalised, but
+# before the main process drops to the unprivileged `ai` account.  This is
+# deliberately opt-in: ordinary services leave AI_ROOT_PRESTART unset.
+#
+# Keep the contract narrow.  It accepts one image-provided absolute executable
+# path only; it does not evaluate shell fragments from an environment value.
+if [ -n "${AI_ROOT_PRESTART:-}" ]; then
+    case "$AI_ROOT_PRESTART" in
+        /*) ;;
+        *)
+            log 'AI_ROOT_PRESTART must be an absolute executable path'
+            exit 1
+            ;;
+    esac
+    if [ ! -x "$AI_ROOT_PRESTART" ]; then
+        log "AI_ROOT_PRESTART is not executable: $AI_ROOT_PRESTART"
+        exit 1
+    fi
+    "$AI_ROOT_PRESTART"
+fi
 
 if [ "$#" -eq 0 ]; then
     set -- /bin/bash

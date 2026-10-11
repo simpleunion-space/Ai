@@ -1,16 +1,14 @@
 # This image is NOT built by cmd_images/docker_cmd build like every other
 # docker/<name>/Dockerfile in this repo - see ensure_openclaw_sandbox_image()
-# in apply.sh, which builds it by piping this file's content over
-# `docker exec -i ai-stand-openclaw-sandbox-dind docker build -t
-# openclaw-sandbox:bookworm-slim -` (stdin only, no COPY/ADD, so no build
-# context is needed and none is provided).
+# in apply.sh, which builds the fixed-tag image directly in the node-local
+# Docker daemon.
 #
 # Why this file has to exist at all: OpenClaw's Docker sandbox backend
 # (agents.defaults.sandbox.backend=docker, see docker/openclaw/init.mjs)
 # refuses to start any sandboxed session until an image named exactly
 # openclaw-sandbox:bookworm-slim already exists in whatever daemon
-# DOCKER_HOST points at (here: the openclaw-sandbox-dind sidecar) - it does
-# NOT fall back to a plain debian:bookworm-slim image. Confirmed via
+# DOCKER_HOST points at (through the restricted Docker Socket Proxy) - it
+# does NOT fall back to a plain debian:bookworm-slim image. Confirmed via
 # OpenClaw's own bundled docs, read live from inside the running
 # openclaw-gateway container at
 # /usr/local/lib/node_modules/openclaw/docs/gateway/sandboxing.md, and via
@@ -24,8 +22,8 @@
 # docker/openclaw/Dockerfile installs OpenClaw via
 # `npm install --global --omit=dev "openclaw@${OPENCLAW_VERSION}"`, so we
 # never have that script and never will. The content below is instead that
-# same docs' official npm-install fallback recipe, copied verbatim - do not
-# "improve" it independently. It MUST stay in sync with whatever OpenClaw's
+# same docs' official npm-install fallback recipe, with openssh-client added
+# for Git-over-SSH in sandboxes. The base MUST stay in sync with whatever OpenClaw's
 # own sandbox backend actually expects of openclaw-sandbox:bookworm-slim for
 # whatever OPENCLAW_VERSION docker/openclaw/Dockerfile currently pins -
 # re-check docs/gateway/sandboxing.md inside the openclaw-gateway container
@@ -36,9 +34,13 @@
 FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  bash ca-certificates curl git jq python3 ripgrep \
+  bash ca-certificates curl git jq openssh-client python3 ripgrep \
   && rm -rf /var/lib/apt/lists/*
-RUN useradd --create-home --shell /bin/bash sandbox
+# The Docker sandbox backend runs as 10000:20000 (see docker/openclaw/init.mjs).
+# Keep NSS identity aligned: OpenSSH requires getpwuid(runtime_uid), even
+# when no connection or authentication is attempted (for example ssh -G).
+RUN groupadd --gid 20000 sandbox \
+  && useradd --uid 10000 --gid 20000 --create-home --shell /bin/bash sandbox
 USER sandbox
 WORKDIR /home/sandbox
 CMD ["sleep", "infinity"]

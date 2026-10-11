@@ -1,17 +1,11 @@
 # syntax=docker/dockerfile:1.7
 
-ARG BASE_IMAGE=ghcr.io/simpleunion/base:2026.08.07-1
-# Must be declared before this file's first FROM to resolve in the
-# docker-cli stage's own FROM below - confirmed live that an ARG declared
-# immediately before a LATER FROM (i.e. after some earlier FROM has already
-# occurred in the file) is NOT treated as global for image-reference
-# resolution, even though textually it looks identical to this one.
-ARG DOCKER_CLI_VERSION=29.8.0
+ARG BASE_IMAGE=ghcr.io/simpleunion/base:2026.10.13-1
 FROM ${BASE_IMAGE} AS node-base
 
-ARG NODE_VERSION=24.20.0
+ARG NODE_VERSION=24.21.0
 
-ENV IM_TZ=Europe/Moscow \
+ENV IM_TZ=UTC \
     IM_UID=1000 \
     IM_GID=1000
 
@@ -19,56 +13,58 @@ COPY --chmod=0755 docker/lib/install-node.sh /tmp/install-node.sh
 RUN /tmp/install-node.sh "$NODE_VERSION" && rm -f /tmp/install-node.sh
 
 
-# Named stage, not an inline COPY --from=docker:${DOCKER_CLI_VERSION}-cli:
-# BuildKit does not expand ARGs inside a COPY --from=<external-image>
-# reference (confirmed live - it fails with `failed to parse stage name
-# "docker:${DOCKER_CLI_VERSION}-cli": invalid reference format` regardless of
-# where the ARG is declared). ARG substitution IS reliable in a FROM line
-# (see BASE_IMAGE above), so resolve the version there and reference this
-# stage by its fixed name instead.
-FROM docker:${DOCKER_CLI_VERSION}-cli AS docker-cli
-
-
 FROM node-base AS openclaw
 
-ARG OPENCLAW_VERSION=2026.9.4
+ARG OPENCLAW_VERSION=2026.10.2
 
-COPY --chmod=0755 docker/openclaw/apply-authentik-display-name-patch.mjs /tmp/apply-authentik-display-name-patch.mjs
-COPY --chmod=0755 docker/openclaw/apply-authentik-requester-identity-patch.mjs /tmp/apply-authentik-requester-identity-patch.mjs
+COPY --chmod=0755 docker/openclaw/patch-worker-artifact.py /tmp/patch-worker-artifact.py
+COPY --chmod=0755 docker/openclaw/install-subscription-cli.py /tmp/install-subscription-cli.py
 
+# The Docker sandbox backend invokes the Docker CLI against DOCKER_HOST.
+# Ubuntu's docker.io package supplies that CLI but no daemon is started in
+# this image; compose.yaml supplies a private socket-proxy endpoint and never
+# mounts /var/run/docker.sock here.
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends git \
-    && npm install --global --omit=dev "openclaw@${OPENCLAW_VERSION}" \
-    && node /tmp/apply-authentik-display-name-patch.mjs /usr/local/lib/node_modules/openclaw \
-    && node /tmp/apply-authentik-requester-identity-patch.mjs /usr/local/lib/node_modules/openclaw \
-    && rm -f /tmp/apply-authentik-display-name-patch.mjs /tmp/apply-authentik-requester-identity-patch.mjs \
+    && apt-get install --yes --no-install-recommends docker.io git openssh-client python3 \
+    && npm pack --ignore-scripts --pack-destination /tmp "openclaw@${OPENCLAW_VERSION}" \
+    && python3 /tmp/install-subscription-cli.py --verify-openclaw /tmp/openclaw-2026.10.2.tgz \
+    && npm install --global --omit=dev /tmp/openclaw-2026.10.2.tgz \
+    && python3 /tmp/patch-worker-artifact.py /usr/local/lib/node_modules/openclaw \
+    && python3 /tmp/install-subscription-cli.py \
+    && ln -s /opt/openclaw/subscription-cli/claude/2.1.296/claude /usr/local/bin/claude \
+    && rm -f /tmp/patch-worker-artifact.py /tmp/install-subscription-cli.py /tmp/openclaw-2026.10.2.tgz \
     && npm cache clean --force \
     && test "$(node --print 'require("/usr/local/lib/node_modules/openclaw/package.json").version')" = "${OPENCLAW_VERSION}" \
     && openclaw --version \
-    && install -d --owner=ai --group=ai --mode=0755 /opt/openclaw \
+    && install -d --owner=root --group=root --mode=0755 /opt/openclaw \
     && rm -rf /var/lib/apt/lists/*
 
-# Sandbox mode (agents.defaults.sandbox.backend=docker, see init.mjs) shells
-# out to a `docker` CLI subprocess against openclaw-sandbox-dind over
-# DOCKER_HOST - it needs the client binary on PATH, not just network
-# reachability. Pull only the static, dependency-free CLI from Docker's
-# official image (docker-cli stage above): no daemon, no extra apt repo/GPG key.
-COPY --from=docker-cli --chmod=0755 /usr/local/bin/docker /usr/local/bin/docker
-
 COPY --chown=ai:ai --chmod=0644 docker/openclaw/init.mjs /opt/openclaw/init.mjs
-# OpenClaw accepts a local plugin artifact only when it is owned by root (or
-# UID 0): an unprivileged, mutable plugin directory would be a code-injection
-# path.  Mode 0755 keeps the immutable image-owned files readable and
-# traversable by the non-root gateway process without making that process the
-# plugin owner.
-COPY --chmod=0755 docker/openclaw-gigacode-requester /opt/openclaw/gigacode-requester-plugin
+COPY --chown=ai:ai --chmod=0644 docker/openclaw/subscription-models.mjs docker/openclaw/subscription-models.json /opt/openclaw/
+COPY --chmod=0755 docker/openclaw/migrate-subscription-selections.mjs /opt/openclaw/migrate-subscription-selections.mjs
+COPY --chmod=0755 docker/openclaw/root-prestart.sh /usr/local/bin/openclaw-root-prestart.sh
 COPY --chmod=0755 docker/openclaw/entrypoint.sh /usr/local/bin/openclaw-gateway-entrypoint.sh
+COPY --chmod=0755 docker/openclaw/verify-subscription-cli.sh /usr/local/bin/openclaw-verify-subscription-cli.sh
+
+# Git over SSH with the dedicated key that docker/ssh-key-delivery delivers from Authentik and compose.yaml mounts
+# read-only at /run/ai-stand/ssh. ssh skips an identity file that does not exist; accept-new records a host key on first
+# contact in the persistent home instead of failing a non-interactive agent on the prompt.
+RUN printf '%s\n' \
+        '# Managed by ai-stand (docker/openclaw/Dockerfile).' \
+        'Host *' \
+        '  IdentityFile /run/ai-stand/ssh/id_ed25519' \
+        '  StrictHostKeyChecking accept-new' \
+        > /etc/ssh/ssh_config.d/50-ai-stand.conf
 
 ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt \
     OPENCLAW_HOME=/home/ai \
     OPENCLAW_STATE_DIR=/home/ai/.openclaw \
     OPENCLAW_CONFIG_PATH=/home/ai/.openclaw/openclaw.json \
-    OPENCLAW_WORKSPACE_DIR=/home/ai/.openclaw/workspace
+    OPENCLAW_WORKSPACE_DIR=/home/ai/.openclaw/workspace \
+    OPENCLAW_CODEX_APP_SERVER_BIN=/opt/openclaw/subscription-cli/codex/0.162.1/vendor/x86_64-unknown-linux-musl/bin/codex \
+    DISABLE_AUTOUPDATER=1 \
+    PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin:/home/ai/.local/bin \
+    AI_ROOT_PRESTART=/usr/local/bin/openclaw-root-prestart.sh
 
 EXPOSE 18789
 

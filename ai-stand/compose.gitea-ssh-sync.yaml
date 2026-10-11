@@ -1,0 +1,97 @@
+# Optional Gitea SSH-key synchronizer (docker/gitea-ssh-sync).
+#
+# Unlike the other overlays this file is NEVER combined with compose.yaml. Its
+# two credentials are issued by services that must already be running (an
+# Authentik API token and a Gitea administrator token), and a Docker secret can
+# neither exist before that nor be edited afterwards. `apply.sh
+# configure-gitea-ssh-sync` therefore issues the credentials, creates the
+# secrets and deploys this file on its own into the existing stack; a generic
+# `deploy` does not list the service, and `docker stack deploy` without
+# --prune leaves it alone. Because the file is deployed alone, the two overlay
+# networks are referenced as external.
+
+services:
+  gitea-ssh-sync:
+    image: ${GITEA_SSH_SYNC_IMAGE:?GITEA_SSH_SYNC_IMAGE is required}
+    user: "10000:20000"
+    read_only: true
+    environment:
+      AUTHENTIK_URL: http://authentik:9000
+      GITEA_URL: http://gitea:3000
+      # The Gitea authentication source that Authentik signs users in through;
+      # apply.sh reads it from Gitea. Empty accepts any external source.
+      GITEA_AUTH_SOURCE_ID: ${GITEA_SSH_SYNC_AUTH_SOURCE_ID:-}
+      # 0 only plans (logs what would change); 1 writes to Gitea.
+      SYNC_APPLY: ${GITEA_SSH_SYNC_APPLY:-1}
+      # Service accounts (bots): the same name as an Authentik service account and a LOCAL Gitea account.
+      SERVICE_ACCOUNTS: ${GITEA_SSH_SYNC_SERVICE_ACCOUNTS:-}
+      SYNC_INTERVAL_SECONDS: "60"
+      TZ: "${IM_TZ:?IM_TZ is required}"
+    secrets:
+      - source: ai-stand-gitea-ssh-sync-authentik-token
+        target: ai-stand-gitea-ssh-sync-authentik-token
+        uid: "10000"
+        gid: "20000"
+        mode: 0400
+      - source: ai-stand-gitea-ssh-sync-gitea-token
+        target: ai-stand-gitea-ssh-sync-gitea-token
+        uid: "10000"
+        gid: "20000"
+        mode: 0400
+    volumes:
+      - type: tmpfs
+        target: /tmp
+    networks:
+      - ai-core
+      - ai-gitea-control
+    cap_drop:
+      - ALL
+    stop_grace_period: 10s
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/python3
+        - /opt/gitea-ssh-sync/sync.py
+        - --healthcheck
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          - node.labels.ai-stand.gitea == true
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+      restart_policy:
+        condition: any
+        delay: 15s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 2m
+        order: stop-first
+      rollback_config:
+        parallelism: 1
+        delay: 10s
+        monitor: 2m
+        order: stop-first
+
+networks:
+  ai-core:
+    external: true
+    name: ${STACK_NAME:-ai-stand}_ai-core
+  ai-gitea-control:
+    external: true
+    name: ${STACK_NAME:-ai-stand}_ai-gitea-control
+
+secrets:
+  ai-stand-gitea-ssh-sync-authentik-token:
+    external: true
+  ai-stand-gitea-ssh-sync-gitea-token:
+    external: true

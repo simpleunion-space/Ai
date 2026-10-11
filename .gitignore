@@ -96,17 +96,33 @@ artifacts
 
 ### Secrets directories
 .vault-pass
+_secrets/
 
 ### Secrets files
 vault-password-file
 *.key
 *.pem
+*.crt
+*.csr
 *.p12
 *.pfx
 *.ovpn
 .env
 .env.*
 !.env.example
+*.env
+!*.env.example
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.token
+
+### Installation transfer artefacts (never commit)
+# Source snapshots and host inventory handoffs move through the workstation
+# while operating an installation; they describe a live installation.
+.ai-stand-stage-*
+*.tar.gz
+*handoff*.json
 
 ### Full path
 .download
